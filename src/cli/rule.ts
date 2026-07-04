@@ -91,15 +91,28 @@ export function handleRule(opts: { path?: string }) {
     `7. **Code snapshots — refresh if stale** — if you open a source file and notice the stored snapshot differs from the actual file, call ${bt}update_history${bt} with the fresh code before making any changes. Stale snapshots must be corrected first.`,
     '',
     '### Available Tools',
-    [
-      'search_nodes', 'get_node_summary', 'get_node_code', 'get_node_graph',
-      'get_node_history', 'update_history', 'add_node', 'add_connection',
-      'rename_node', 'deprecate_node', 'get_recent_changes', 'get_developer_activity',
-      'get_changes_by_requirement', 'search_decisions', 'get_orphaned_nodes',
-      'recheck_graph', 'get_visualizer_url'
-    ].map(t => `${bt}${t}${bt}`).join(' · '),
     '',
-    '> All tool schemas and argument details are exposed automatically by the MCP server.'
+    '| Tool | Use when |',
+    '|------|----------|',
+    `| ${bt}search_nodes${bt} | Find nodes by name, keyword, or reasoning text |`,
+    `| ${bt}get_node_summary${bt} | Get file location, connection count, history count for a node |`,
+    `| ${bt}get_node_code${bt} | Get latest stored code snapshot for a node (check before reading file) |`,
+    `| ${bt}get_node_graph${bt} | See all callers/dependencies of a node up to N levels deep |`,
+    `| ${bt}get_node_history${bt} | Read all past snapshots and reasoning logs for a node |`,
+    `| ${bt}update_history${bt} | Save a code snapshot + reasoning after editing a function/class |`,
+    `| ${bt}add_node${bt} | Register a new function, class, or entity in the graph |`,
+    `| ${bt}add_connection${bt} | Link two nodes with a caller → callee dependency |`,
+    `| ${bt}rename_node${bt} | Rename a node ID and update all its connections/history |`,
+    `| ${bt}deprecate_node${bt} | Mark a removed function/class as deprecated (preserves history) |`,
+    `| ${bt}get_recent_changes${bt} | List nodes modified in the last N hours across the project |`,
+    `| ${bt}get_developer_activity${bt} | List recent changes made by a specific developer |`,
+    `| ${bt}get_changes_by_requirement${bt} | Find all changes linked to a ticket or requirement ID |`,
+    `| ${bt}search_decisions${bt} | Search architectural reasoning and decision logs by keyword |`,
+    `| ${bt}get_orphaned_nodes${bt} | Find nodes with no connections (dead code / stale entries) |`,
+    `| ${bt}recheck_graph${bt} | Scan files, deprecate nodes for deleted files, clean primitives |`,
+    `| ${bt}get_visualizer_url${bt} | Get URL to open the interactive 2D/3D graph visualizer |`,
+    '',
+    '> All tool argument schemas are exposed automatically by the MCP server.'
   ];
 
   const rule = lines.filter(l => l !== null).join('\n');
