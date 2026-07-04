@@ -1,7 +1,7 @@
 # 🧠 DevsMind — Team AI Brain
 
 [![NPM Version](https://img.shields.io/npm/v/devsmind?color=blue)](https://www.npmjs.com/package/devsmind)
-[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/lucky/devsmind/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Abialidr/devsmind/blob/main/LICENSE)
 [![Awesome MCP](https://img.shields.io/badge/MCP-Awesome-purple)](https://modelcontextprotocol.io)
 
 > **The evolutionary collective memory layer for your AI coding agents. Shared across your entire team.**
