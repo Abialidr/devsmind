@@ -30,16 +30,16 @@
     "sqlite",
     "git"
   ],
-  "author": "Lucky",
+  "author": "Abialidr",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lucky/devsmind.git"
+    "url": "git+https://github.com/Abialidr/devsmind.git"
   },
   "bugs": {
-    "url": "https://github.com/lucky/devsmind/issues"
+    "url": "https://github.com/Abialidr/devsmind/issues"
   },
-  "homepage": "https://github.com/lucky/devsmind#readme",
+  "homepage": "https://github.com/Abialidr/devsmind#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.1",
     "@types/express": "^5.0.6",
