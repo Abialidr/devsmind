@@ -136,14 +136,17 @@ Index the entire workspace upfront so the AI knows every type, schema, and API c
 
 > 💡 **Model-Dependent Indexing**: The speed and quality of indexing depend on the selected AI model. A smarter, more capable model (e.g., Gemini 1.5 Pro, Claude 3.5 Sonnet) will take slightly longer to parse complex syntax and relationships but yields a much more accurate and comprehensive code graph.
 >
-> 🧹 **Pruning & Maintenance**: During active development, DevsMind dynamically handles deletions and renames if function signatures match. For manual cleanup and auditing, you have access to specialized tools:
-> *   `recheck_graph`: Scans code files, cleans up language primitives, built-ins, or nodes associated with deleted files (while preserving any nodes with active history logs).
+> 🧹 **Pruning & Maintenance**: During active development, DevsMind dynamically handles deprecations and renames if function signatures match. For manual cleanup and auditing, you have access to specialized tools:
+> *   `recheck_graph`: Scans code files, marks language primitives, built-ins, or nodes associated with deleted files as deprecated (removing their connections in the graph, but keeping their entries in the database).
 > *   `get_orphaned_nodes`: Finds disconnected code nodes that have no incoming or outgoing connections to identify dead code or stale records.
 > 
-> ⚠️ **Preservation Over Deletion**: The AI agent will never delete historical context by itself; it preserves all evolution records.
-> *   `delete_node` is scheduled to be deprecated.
-> *   It will be replaced with a **deprecation mechanism** that keeps the node, its full coding history, and snapshots, but cuts its active connection links in the graph.
-> *   A future terminal utility function will be added, allowing users to manually prune deleted/deprecated nodes if they explicitly wish to reduce the database file size.
+> ⚠️ **Preservation Over Deletion**: The AI agent will never delete historical context by itself; it preserves all evolution records. The `delete_node` MCP tool is removed.
+> *   Spurious or missing nodes are **deprecated** (keeping their code history and reasoning intact, but removing active connections in the graph).
+> *   An interactive terminal tool is provided to let users review, inspect, and prune nodes:
+>     ```bash
+>     devsmind prune
+>     ```
+>     This utility allows you to view node stats, inspect current code, page through chronological change history, and permanently delete individual nodes or clear all nodes/history as desired.
 
 *   *Ideal for:* Production systems and team collaboration, preventing bugs where AI modifies variables used in undocumented parts of the system.
 
@@ -202,7 +205,6 @@ CREATE TABLE history (
 DevsMind tools are designed with **layered granularity**. The AI only pulls the depth of data it needs, keeping token overhead minimal.
 
 ### 🔍 Category 1: Discovery & Structure
-*   `get_project_context`: Returns workspace layout, repositories, and framework metadata.
 *   `get_node_summary`: Returns node type, location, connections count, history counts, and last update. (~50 tokens)
 *   `get_node_graph`: Recursively retrieves connected nodes and relationships up to a specified depth (default: 6).
 *   `get_orphaned_nodes`: Identifies disconnected code nodes in the graph that have no incoming or outgoing connections.
@@ -225,11 +227,10 @@ DevsMind tools are designed with **layered granularity**. The AI only pulls the 
 *   `add_node`: Registers a new structure (function, class, endpoint, schema, variable, etc.) in the graph.
 *   `add_connection`: Links two structures together as a dependency relationship (`source` uses/calls `target`).
 *   `update_history`: Registers a code snapshot and writes history logs (respects the 1h session boundary rule).
-*   `delete_node`: Purges a node and all its incoming/outgoing connections from the graph. *(Deprecated — preservation mechanism is preferred to keep historical context).*
 *   `rename_node`: Re-keys a node identifier and updates all associated records (connections and history) seamlessly.
 
 ### 🧹 Category 5: Optimization & Maintenance
-*   `recheck_graph`: Scans the graph to verify file existence and prunes language primitives, builtins, and nodes associated with missing/deleted files, retaining nodes with active histories.
+*   `recheck_graph`: Scans the graph to verify file existence and deprecates language primitives, builtins, and nodes associated with missing/deleted files, retaining nodes with active histories.
 *   `search_nodes`: Full-text search (FTS5) index for node names, identifiers, and reasoning logs.
 
 ---

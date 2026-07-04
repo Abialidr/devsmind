@@ -60,21 +60,6 @@ function createMcpServer(): Server {
     return {
       tools: [
         {
-          name: 'get_project_context',
-          description:
-            'Get configuration, architecture, and workspace details of the project.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              devmind_path: {
-                type: 'string',
-                description: 'Absolute path to the .devmind directory'
-              }
-            },
-            required: ['devmind_path']
-          }
-        },
-        {
           name: 'get_node_summary',
           description:
             'Get a quick summary of a specific code node (existence, file location, connections count, history count, and last update timestamp).',
@@ -370,18 +355,6 @@ function createMcpServer(): Server {
           }
         },
         {
-          name: 'delete_node',
-          description: 'Delete a code node and all its incoming/outgoing connections from the graph.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
-              node_id: { type: 'string', description: 'Unique identifier for the node to delete' }
-            },
-            required: ['devmind_path', 'node_id']
-          }
-        },
-        {
           name: 'rename_node',
           description: 'Rename a code node ID (and optionally its display name), updating all its associations (connections and history).',
           inputSchema: {
@@ -480,14 +453,6 @@ function createMcpServer(): Server {
 
     try {
       switch (name) {
-        case 'get_project_context': {
-          const devmindPath = String(args.devmind_path);
-          const context = loadProjectContext(devmindPath);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(context, null, 2) }]
-          };
-        }
-
         case 'get_node_summary': {
           const devmindPath = String(args.devmind_path);
           const nodeId = String(args.node_id);
@@ -804,16 +769,6 @@ function createMcpServer(): Server {
           const results = db.searchNodes(query);
           return {
             content: [{ type: 'text', text: JSON.stringify(results, null, 2) }]
-          };
-        }
-
-        case 'delete_node': {
-          const devmindPath = String(args.devmind_path);
-          const nodeId = String(args.node_id);
-          const db = getDatabase(devmindPath);
-          db.deleteNode(nodeId);
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ success: true, deleted: nodeId }) }]
           };
         }
 

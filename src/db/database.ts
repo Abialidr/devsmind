@@ -48,6 +48,11 @@ export class DevMindDatabase {
 
   private initSchema() {
     this.db.exec(INIT_SCHEMA_SQL);
+    try {
+      this.db.exec('ALTER TABLE nodes ADD COLUMN deprecated INTEGER DEFAULT 0');
+    } catch {
+      // Column already exists, ignore
+    }
   }
 
   close() {
@@ -64,7 +69,8 @@ export class DevMindDatabase {
         type = excluded.type,
         name = excluded.name,
         file_path = excluded.file_path,
-        signature = COALESCE(excluded.signature, nodes.signature)
+        signature = COALESCE(excluded.signature, nodes.signature),
+        deprecated = 0
     `);
     stmt.run(node.id, node.type, node.name, node.file_path, node.signature || null);
   }
@@ -77,6 +83,16 @@ export class DevMindDatabase {
   deleteNode(id: string) {
     const stmt = this.db.prepare('DELETE FROM nodes WHERE id = ?');
     stmt.run(id);
+  }
+
+  deprecateNode(id: string) {
+    const updateStmt = this.db.prepare('UPDATE nodes SET deprecated = 1 WHERE id = ?');
+    const deleteConnStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? OR target_node_id = ?');
+    const tx = this.db.transaction(() => {
+      updateStmt.run(id);
+      deleteConnStmt.run(id, id);
+    });
+    tx();
   }
 
   renameNode(oldId: string, newId: string, newName?: string) {
@@ -418,10 +434,10 @@ export class DevMindDatabase {
       'any', 'void', 'unknown', 'never', 'null', 'undefined', 'dict', 'list'
     ]);
 
-    // Get nodes with 0 history entries
+    // Get nodes with 0 history entries that are not already deprecated
     const stmt = this.db.prepare(`
       SELECT id, name, file_path FROM nodes
-      WHERE id NOT IN (SELECT DISTINCT node_id FROM history)
+      WHERE deprecated = 0 AND id NOT IN (SELECT DISTINCT node_id FROM history)
     `);
     const candidates = stmt.all() as { id: string; name: string; file_path: string }[];
 
@@ -453,13 +469,15 @@ export class DevMindDatabase {
     }
 
     if (idsToDelete.length > 0) {
-      const deleteStmt = this.db.prepare('DELETE FROM nodes WHERE id = ?');
-      const deleteTx = this.db.transaction((ids: string[]) => {
+      const updateStmt = this.db.prepare('UPDATE nodes SET deprecated = 1 WHERE id = ?');
+      const deleteConnStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? OR target_node_id = ?');
+      const deprecateTx = this.db.transaction((ids: string[]) => {
         for (const id of ids) {
-          deleteStmt.run(id);
+          updateStmt.run(id);
+          deleteConnStmt.run(id, id);
         }
       });
-      deleteTx(idsToDelete);
+      deprecateTx(idsToDelete);
     }
 
     return {

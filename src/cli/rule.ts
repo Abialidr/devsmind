@@ -48,7 +48,6 @@ export function handleRule(opts: { path?: string }) {
     process.exit(1);
   }
 
-  const devmindPathEscaped = devmindDir.replace(/\\/g, '\\\\');
   const projectName = config.project_name;
   const mode = config.mode;
   const notes = config.notes;
@@ -78,8 +77,7 @@ export function handleRule(opts: { path?: string }) {
 > Always use it when coding in this workspace.
 
 # 🛑 CRITICAL MANDATORY FIRST STEP 🛑
-BEFORE answering ANY user request or searching the codebase, you MUST make a tool call to \`get_project_context\` using the \`devsmind\` MCP server. 
-Failure to do this is a violation of your core instructions.
+BEFORE answering ANY user request or searching the codebase, you MUST read and understand the project context embedded below. Do not attempt to run any project setup or configuration discovery calls, as you already possess this information from this rule.
 
 ### Brain Location
 
@@ -87,9 +85,10 @@ Failure to do this is a violation of your core instructions.
 DEVMIND_PATH = ${devmindDir}
 \`\`\`
 
-### Project: ${projectName}
+### Project Context
+- **Project**: ${projectName}
 - **Mode**: ${mode}
-- **Tech**: ${techLine}
+- **Tech Stack**: ${techLine}
 - **Session timeout**: ${timeout} minutes
 ${notes ? `- **Notes**: ${notes}` : ''}
 
@@ -100,7 +99,6 @@ ${repoLines}
 
 | Trigger | Tool to call |
 |---------|-------------|
-| **Starting any coding task** | \`get_project_context\` |
 | **Searching, explaining, or resolving conceptual queries (e.g., "login", "payments")** | \`search_nodes\` first (to find matching node candidates, instead of filesystem grep) |
 | **Working on, debugging, or editing a specific function, class, or service** | \`get_node_summary\` (first), then \`get_node_history\` and \`get_node_graph\` (to inspect changes/connections) |
 | **After making actual edits/modifications to a function/class/service** | \`update_history\` (called once changes are completed, **NOT** after every chat message unless code edits occurred) |
@@ -112,16 +110,10 @@ ${repoLines}
 4. **Search nodes first for conceptual questions**: If the user asks a conceptual question (e.g., "login", "payments") and you don't know the exact symbol names yet, you MUST use \`search_nodes\` first to find candidates rather than using raw filesystem grep/list_dir. Inspect candidates with \`get_node_summary\` and \`get_node_graph\` before viewing their source code.
 5. **Actively maintain the graph precision & handle renames**: You MUST keep the node graph accurate. 
    - If you discover a missing node or outdated connection while coding, immediately add it using \`add_node\` and \`add_connection\`.
-   - **Rename Protocol**: If you find a new node at a file location where a different node used to be (e.g. during refactoring or renaming a function), do NOT just delete and re-add. First check if it is a rename of the existing node (e.g. same logic/file/location but different name). If it is a rename, use \`rename_node\` to update the ID and name (preserving its change history and connections). If it is NOT a rename (i.e. the old function was deleted and a completely new unrelated function was written in its place), delete the old node using \`delete_node\` and add the new one with \`add_node\`.
-   - If a node is completely removed from the codebase, immediately delete it using \`delete_node\`. Do not leave orphaned or stale nodes.
+   - **Rename Protocol**: If you find a new node at a file location where a different node used to be (e.g. during refactoring or renaming a function), do NOT just delete and re-add. First check if it is a rename of the existing node (e.g. same logic/file/location but different name). If it is a rename, use \`rename_node\` to update the ID and name (preserving its change history and connections).
+   - **Deletion Protocol**: Do not delete any nodes yourself. DevsMind dynamically marks nodes as deprecated when files change or when running recheck commands to preserve their history.
 
 ### Tool Reference
-
-**\`get_project_context\`**
-\`\`\`
-devmind_path: "${devmindDir}"
-\`\`\`
-Returns project config, repos, tech stack, team notes, and developer context.
 
 **\`search_nodes\`**
 \`\`\`
@@ -151,13 +143,6 @@ node_id: "<starting function or class name>"
 max_depth: 6
 \`\`\`
 Returns a localized node dependency graph up to a specified depth (default 6), showing connected nodes and relationships.
-
-**\`delete_node\`**
-\`\`\`
-devmind_path: "${devmindDir}"
-node_id: "<node ID to delete>"
-\`\`\`
-Delete a code node and all its incoming/outgoing connections from the graph. Use this if a function/class is deleted, or if an improper/incorrect node was accidentally created.
 
 **\`rename_node\`**
 \`\`\`

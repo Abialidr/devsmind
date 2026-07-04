@@ -4,6 +4,7 @@ export interface DbNode {
   name: string;
   file_path: string;
   signature: string | null;
+  deprecated: number;
   created_at: string;
 }
 
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   name        TEXT NOT NULL,
   file_path   TEXT NOT NULL,
   signature   TEXT,
+  deprecated  INTEGER DEFAULT 0,
   created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

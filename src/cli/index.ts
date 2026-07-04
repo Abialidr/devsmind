@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import { handleInit } from './init';
 import { handleRule } from './rule';
 import { handleView } from './view';
+import { handlePrune } from './prune';
 import { runHttpMcpServer, runStdioMcpServer, DEVSMIND_PORT } from '../mcp/server';
 
 const program = new Command();
@@ -91,6 +92,19 @@ program
     console.log(`   "Then read every file it returns and call add_node + add_connection for each entity."`);
     console.log(`   "Checkpoint every 10 files. Call index_complete when done."\n`);
     console.log(`   Or simply type:  /devsmind index  in your IDE chat.\n`);
+  });
+
+program
+  .command('prune')
+  .description('Interactively review, inspect, and permanently prune nodes and history')
+  .option('-p, --path <devmind_path>', 'Path to the .devmind directory (auto-detected from cwd by default)')
+  .action(async (opts: { path?: string }) => {
+    try {
+      await handlePrune(opts);
+    } catch (err) {
+      console.error(`❌ Pruning failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
   });
 
 program.parse(process.argv);
