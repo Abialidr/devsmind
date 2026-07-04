@@ -25,6 +25,9 @@ const dbCache = new Map<string, DevMindDatabase>();
 
 function getDatabase(devmindPath: string): DevMindDatabase {
   const resolved = path.resolve(devmindPath);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`Cannot open database because the directory does not exist: "${resolved}". Please check your rule settings and ensure the path is not mangled (use forward slashes "/" to prevent escape sequence issues).`);
+  }
   const dbFile = path.join(resolved, 'brain.db');
 
   if (!dbCache.has(dbFile)) {

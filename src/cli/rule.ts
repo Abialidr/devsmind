@@ -58,13 +58,14 @@ export function handleRule(opts: { path?: string }) {
     : 'Not specified';
 
   const timeout = config.session_timeout_minutes ?? 60;
+  const safeDevmindDir = devmindDir.replace(/\\/g, '/');
 
   const bt = '`';
 
   const lines = [
     '## DevsMind — AI Brain',
     '',
-    `**DEVMIND_PATH**: ${bt}${devmindDir}${bt}`,
+    `**DEVMIND_PATH**: ${bt}${safeDevmindDir}${bt}`,
     `**Project**: ${projectName} | **Mode**: ${mode} | **Tech**: ${techLine} | **Session timeout**: ${timeout}min`,
     `**Repos**: ${repoLines}`,
     notes ? `**Notes**: ${notes}` : '',
