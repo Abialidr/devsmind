@@ -59,37 +59,50 @@ export function handleRule(opts: { path?: string }) {
 
   const timeout = config.session_timeout_minutes ?? 60;
 
-  const rule = `
-## DevsMind — AI Brain
+  const bt = '`';
 
-**DEVMIND_PATH**: \`${devmindDir}\`
-**Project**: ${projectName} | **Mode**: ${mode} | **Tech**: ${techLine} | **Session timeout**: ${timeout}min
-**Repos**: ${repoLines}
-${notes ? `**Notes**: ${notes}` : ''}
+  const lines = [
+    '## DevsMind — AI Brain',
+    '',
+    `**DEVMIND_PATH**: ${bt}${devmindDir}${bt}`,
+    `**Project**: ${projectName} | **Mode**: ${mode} | **Tech**: ${techLine} | **Session timeout**: ${timeout}min`,
+    `**Repos**: ${repoLines}`,
+    notes ? `**Notes**: ${notes}` : '',
+    '',
+    '### Tool Triggers',
+    '',
+    '| Situation | Tool |',
+    '|-----------|------|',
+    `| Searching for a module, feature, or concept | ${bt}search_nodes${bt} |`,
+    `| Need to read the code of a specific function/class | ${bt}get_node_code${bt} |`,
+    `| Working on / debugging a specific function or class | ${bt}get_node_summary${bt} → ${bt}get_node_history${bt} → ${bt}get_node_graph${bt} |`,
+    `| After finishing code edits to a function/class | ${bt}update_history${bt} (once per session, not per message) |`,
+    `| Function/class is renamed | ${bt}rename_node${bt} |`,
+    `| Function/class is removed from codebase | ${bt}deprecate_node${bt} |`,
+    '',
+    '### Critical Rules',
+    '',
+    `1. **Never guess dependencies** — call ${bt}get_node_graph${bt} before touching any function signature.`,
+    `2. **Always read history first** — call ${bt}get_node_history${bt} before refactoring to understand past decisions.`,
+    `3. **No deletions** — never delete nodes. Use ${bt}deprecate_node${bt} to preserve history.`,
+    `4. **Resurrecting nodes** — calling ${bt}update_history${bt} or ${bt}add_node${bt} on a deprecated node automatically re-activates it.`,
+    `5. **Search before grep** — use ${bt}search_nodes${bt} before any filesystem search.`,
+    `6. **Code snapshots — populate if missing** — always call ${bt}get_node_code${bt} before reading a source file. If no snapshot exists, read the file, then immediately call ${bt}update_history${bt} with the current code. Do not skip this — it caches the code for all future agents.`,
+    `7. **Code snapshots — refresh if stale** — if you open a source file and notice the stored snapshot differs from the actual file, call ${bt}update_history${bt} with the fresh code before making any changes. Stale snapshots must be corrected first.`,
+    '',
+    '### Available Tools',
+    [
+      'search_nodes', 'get_node_summary', 'get_node_code', 'get_node_graph',
+      'get_node_history', 'update_history', 'add_node', 'add_connection',
+      'rename_node', 'deprecate_node', 'get_recent_changes', 'get_developer_activity',
+      'get_changes_by_requirement', 'search_decisions', 'get_orphaned_nodes',
+      'recheck_graph', 'get_visualizer_url'
+    ].map(t => `${bt}${t}${bt}`).join(' · '),
+    '',
+    '> All tool schemas and argument details are exposed automatically by the MCP server.'
+  ];
 
-### Tool Triggers
-
-| Situation | Tool |
-|-----------|------|
-| Searching for a module, feature, or concept | \`search_nodes\` |
-| Working on / debugging a specific function or class | \`get_node_summary\` → \`get_node_history\` → \`get_node_graph\` |
-| After finishing code edits to a function/class | \`update_history\` (once per session, not per message) |
-| Function/class is renamed | \`rename_node\` |
-| Function/class is removed from codebase | \`deprecate_node\` |
-
-### Critical Rules
-
-1. **Never guess dependencies** — call \`get_node_graph\` before touching any function signature.
-2. **Always read history first** — call \`get_node_history\` before refactoring to understand past decisions.
-3. **No deletions** — never delete nodes. Use \`deprecate_node\` to preserve history.
-4. **Resurrecting nodes** — calling \`update_history\` or \`add_node\` on a deprecated node automatically re-activates it.
-5. **Search before grep** — use \`search_nodes\` before any filesystem search.
-
-### Available Tools
-\`search_nodes\` · \`get_node_summary\` · \`get_node_graph\` · \`get_node_history\` · \`update_history\` · \`add_node\` · \`add_connection\` · \`rename_node\` · \`deprecate_node\` · \`get_recent_changes\` · \`get_developer_activity\` · \`get_changes_by_requirement\` · \`search_decisions\` · \`get_orphaned_nodes\` · \`recheck_graph\` · \`get_visualizer_url\`
-
-> All tool schemas and argument details are exposed automatically by the MCP server.
-`.trim();
+  const rule = lines.filter(l => l !== null).join('\n');
 
   const divider = '═'.repeat(70);
 

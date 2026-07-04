@@ -211,6 +211,18 @@ export class DevMindDatabase {
     return stmt.all(nodeId) as DbHistory[];
   }
 
+  getLatestCode(nodeId: string): { code_snapshot: string; updated_at: string } | null {
+    const stmt = this.db.prepare(`
+      SELECT code_snapshot, updated_at
+      FROM history
+      WHERE node_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `);
+    return (stmt.get(nodeId) as { code_snapshot: string; updated_at: string }) || null;
+  }
+
+
   getGraph(nodeId: string, maxDepth: number = 6): { nodes: DbNode[]; connections: DbConnection[] } {
     const maxNodesLimit = 500;
     const visited = new Set<string>();

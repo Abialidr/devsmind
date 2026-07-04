@@ -80,6 +80,25 @@ function createMcpServer(): Server {
           }
         },
         {
+          name: 'get_node_code',
+          description:
+            'Returns only the latest code snapshot stored for a node. Token-efficient alternative to get_node_history when you only need the current code. Returns null if no snapshot exists — in that case you MUST read the file, then call update_history to store the code so future agents benefit from the cache.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: {
+                type: 'string',
+                description: 'Absolute path to the .devmind directory'
+              },
+              node_id: {
+                type: 'string',
+                description: 'Unique identifier for the node'
+              }
+            },
+            required: ['devmind_path', 'node_id']
+          }
+        },
+        {
           name: 'update_history',
           description:
             'Update the version history of a code node (applies the 1-hour session boundary rule). Also creates the node if it does not exist.',
@@ -498,6 +517,30 @@ function createMcpServer(): Server {
 
           return {
             content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }]
+          };
+        }
+
+        case 'get_node_code': {
+          const devmindPath = String(args.devmind_path);
+          const nodeId = String(args.node_id);
+          const db = getDatabase(devmindPath);
+          const result = db.getLatestCode(nodeId);
+          if (!result) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({
+                exists: false,
+                node_id: nodeId,
+                message: 'No code snapshot found. Read the source file, then call update_history to cache the code so future agents skip the file read entirely.'
+              }) }]
+            };
+          }
+          return {
+            content: [{ type: 'text', text: JSON.stringify({
+              exists: true,
+              node_id: nodeId,
+              updated_at: result.updated_at,
+              code_snapshot: result.code_snapshot
+            }) }]
           };
         }
 
