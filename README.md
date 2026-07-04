@@ -92,8 +92,12 @@ This will guide you through interactive questions:
 
 It will generate `.devmind/config.json`, `.devmind/.env` (gitignored), and an empty `.devmind/brain.db`.
 
+> 🔄 **Resuming / Re-initializing**: If a `.devmind/` folder and `config.json` already exist (e.g., pulled from Git), running `devsmind init` will detect them. It will **not** overwrite the shared project configuration. Instead, it will only prompt for missing local details:
+> *   Your name and email (stored in `.env`).
+> *   Local repository paths (only prompted for developers using **Standalone Mode**, since paths vary per machine and are stored in the gitignored `.env` file).
+
 ### 3. Set Up Local Paths
-Open the generated `.devmind/.env` and update the local paths for each repository. Because each developer stores code in different directories, this file is gitignored.
+Open the generated `.devmind/.env` and update the local paths for each repository. Because each developer stores code in different directories, this file is gitignored (for Standalone Mode users).
 
 ```bash
 # Example .devmind/.env
