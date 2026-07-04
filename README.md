@@ -212,27 +212,34 @@ DevsMind tools are designed with **layered granularity**. The AI only pulls the 
 
 ### 🔍 Category 1: Discovery & Structure
 *   `get_project_context`: Returns workspace layout, repositories, and framework metadata.
-*   `get_node_summary`: Returns node type, location, connections count, and history counts. (~50 tokens)
-*   `get_node_graph`: Recursively retrieves connected nodes up to a specific depth limit.
-*   `get_connections`: Lists files/nodes that use this entity, and what this entity calls.
+*   `get_node_summary`: Returns node type, location, connections count, history counts, and last update. (~50 tokens)
+*   `get_node_graph`: Recursively retrieves connected nodes and relationships up to a specified depth (default: 6).
+*   `get_orphaned_nodes`: Identifies disconnected code nodes in the graph that have no incoming or outgoing connections.
+*   `get_visualizer_url`: Returns local browser URLs for opening the interactive 2D and 3D graph visualizers.
 
 ### 📜 Category 2: Code & History
 *   `get_node_history`: Retrieves all history records, code snapshots, and change reasoning logs for a node.
 *   `get_recent_changes`: Lists nodes modified across the project in the last N hours (Default: 24h).
-*   `get_developer_activity`: Pulls logs authored by a specific team member.
+*   `get_developer_activity`: Pulls logs and changes authored by a specific team member.
 *   `get_changes_by_requirement`: Finds all changes linked to a particular ticket or task ID (e.g. `JIRA-402`).
 *   `search_decisions`: Performs a text search specifically across the architectural/implementation rationale logs.
 
-### ✍️ Category 3: Writes & Mutations
-*   `add_node`: Registers a new structure in the graph.
-*   `add_connection`: Links two structures together.
-*   `update_history`: Registers a code snapshot and writes history logs (respects the 1h session rule).
-*   `delete_node`: Purges a node and its connections from the graph.
-*   `rename_node`: Re-keys a node identifier and updates all associated records seamlessly.
+### ⚙️ Category 3: Code Indexing
+*   `index_start`: Scans all configured repos, counts files, creates a scratchpad, and starts the codebase indexing session.
+*   `index_checkpoint`: Saves current indexing progress to the scratchpad to survive context limits (called every ~10 files).
+*   `index_continue`: Reads the scratchpad and returns exactly where indexing left off to resume after a context reset.
+*   `index_complete`: Marks the codebase indexing session as fully completed.
 
-### 🧹 Category 4: Optimization & Maintenance
-*   `recheck_graph`: Scans the graph to prune orphaned nodes, language primitives/builtins, and nodes associated with missing files, retaining nodes with active histories.
-*   `search_nodes`: Full-text search (FTS5) index for names, descriptions, and reasoning logs.
+### ✍️ Category 4: Writes & Mutations
+*   `add_node`: Registers a new structure (function, class, endpoint, schema, variable, etc.) in the graph.
+*   `add_connection`: Links two structures together as a dependency relationship (`source` uses/calls `target`).
+*   `update_history`: Registers a code snapshot and writes history logs (respects the 1h session boundary rule).
+*   `delete_node`: Purges a node and all its incoming/outgoing connections from the graph.
+*   `rename_node`: Re-keys a node identifier and updates all associated records (connections and history) seamlessly.
+
+### 🧹 Category 5: Optimization & Maintenance
+*   `recheck_graph`: Scans the graph to verify file existence and prunes language primitives, builtins, and nodes associated with missing/deleted files, retaining nodes with active histories.
+*   `search_nodes`: Full-text search (FTS5) index for node names, identifiers, and reasoning logs.
 
 ---
 
