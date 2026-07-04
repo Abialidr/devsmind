@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+
+import { Command } from 'commander';
+import { handleInit } from './init';
+import { handleRule } from './rule';
+import { handleView } from './view';
+import { runHttpMcpServer, runStdioMcpServer, DEVSMIND_PORT } from '../mcp/server';
+
+const program = new Command();
+
+program
+  .name('devsmind')
+  .description('DevsMind — Team AI Brain CLI')
+  .version('1.0.0', '-v, --version');
+
+program
+  .command('init')
+  .description('Initialize a new DevsMind brain or update repository paths')
+  .action(async () => {
+    try {
+      await handleInit();
+    } catch (err) {
+      console.error(`❌ Initialization failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('start')
+  .description(
+    `Start the DevsMind MCP server\n` +
+    `  Default: HTTP on port ${DEVSMIND_PORT}  (devs→45, mind→M=13 → 4513)\n` +
+    `  IDEs connect via: http://localhost:${DEVSMIND_PORT}/mcp`
+  )
+  .option('--stdio', 'Use stdio transport instead of HTTP (for direct IDE process injection)')
+  .option('-p, --port <number>', `HTTP port to listen on (default: ${DEVSMIND_PORT})`, String(DEVSMIND_PORT))
+  .action(async (opts: { stdio?: boolean; port: string }) => {
+    if (opts.stdio) {
+      // Stdio mode: IDE manages the process directly
+      runStdioMcpServer();
+    } else {
+      // HTTP mode: IDE connects over the network
+      const port = parseInt(opts.port, 10);
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error(`❌ Invalid port: ${opts.port}`);
+        process.exit(1);
+      }
+      try {
+        await runHttpMcpServer(port);
+      } catch (err) {
+        const msg = (err as NodeJS.ErrnoException).message;
+        if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+          console.error(`❌ Port ${port} is already in use. Try: devsmind start --port <other>`);
+        } else {
+          console.error(`❌ MCP Server failed to start: ${msg}`);
+        }
+        process.exit(1);
+      }
+    }
+  });
+
+program
+  .command('rule')
+  .description('Print the ready-to-paste AI workspace rule for this brain')
+  .option('-p, --path <devmind_path>', 'Explicit path to the .devmind directory (auto-detected from cwd by default)')
+  .action((opts: { path?: string }) => {
+    handleRule(opts);
+  });
+
+program
+  .command('view')
+  .description('Open the interactive D3.js code graph visualizer in your browser')
+  .option('-p, --path <devmind_path>', 'Path to the .devmind directory (auto-detected from cwd by default)')
+  .option('-P, --port <number>', `HTTP port to listen on (default: ${DEVSMIND_PORT})`, String(DEVSMIND_PORT))
+  .action(async (opts: { path?: string; port: string }) => {
+    await handleView(opts);
+  });
+
+program
+  .command('index')
+  .description('Kick off the first-time graph indexing of all configured repos')
+  .option('-p, --path <devmind_path>', 'Path to the .devmind directory (default: .devmind in cwd)')
+  .action((opts: { path?: string }) => {
+    const devmindPath = opts.path ?? '.devmind';
+    const resolved = require('path').resolve(devmindPath);
+
+    console.log(`\n🧠 DevsMind — Graph Indexing`);
+    console.log(`   Brain : ${resolved}`);
+    console.log(`\n📋 To index your codebase, tell your AI assistant:\n`);
+    console.log(`   "Call devsmind.index_start with devmind_path = ${resolved}"`);
+    console.log(`   "Then read every file it returns and call add_node + add_connection for each entity."`);
+    console.log(`   "Checkpoint every 10 files. Call index_complete when done."\n`);
+    console.log(`   Or simply type:  /devsmind index  in your IDE chat.\n`);
+  });
+
+program.parse(process.argv);
+

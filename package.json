@@ -1,0 +1,59 @@
+{
+  "name": "devsmind",
+  "version": "1.0.0",
+  "description": "DevsMind — Team AI Brain",
+  "main": "dist/cli/index.js",
+  "bin": {
+    "devsmind": "./dist/cli/index.js"
+  },
+  "type": "commonjs",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.js",
+    "start": "tsx src/cli/index.ts start",
+    "dev": "tsx src/cli/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 0",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "context",
+    "developer-productivity",
+    "documentation",
+    "graph",
+    "sqlite",
+    "git"
+  ],
+  "author": "Lucky",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucky/devsmind.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lucky/devsmind/issues"
+  },
+  "homepage": "https://github.com/lucky/devsmind#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "@types/express": "^5.0.6",
+    "better-sqlite3": "^11.1.2",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.9",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.2"
+  }
+}
