@@ -103,6 +103,160 @@ function scanSubdirectories(dir: string): string[] {
   }
 }
 
+interface TreeEntry {
+  name: string;
+  fullPath: string;
+  relativePath: string;
+  isDir: boolean;
+}
+
+function buildFileTree(dir: string, repoRoot: string): TreeEntry[] {
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    return entries
+      .filter(entry => {
+        const name = entry.name;
+        // Skip default ignored folders
+        if (name === '.git' || name === '.devmind' || name === 'node_modules') {
+          return false;
+        }
+        return true;
+      })
+      .map(entry => {
+        const fullPath = path.join(dir, entry.name);
+        const relativePath = path.relative(repoRoot, fullPath).replace(/\\/g, '/');
+        return {
+          name: entry.name,
+          fullPath,
+          relativePath,
+          isDir: entry.isDirectory()
+        };
+      })
+      .sort((a, b) => {
+        if (a.isDir && !b.isDir) return -1;
+        if (!a.isDir && b.isDir) return 1;
+        return a.name.localeCompare(b.name);
+      });
+  } catch {
+    return [];
+  }
+}
+
+async function showIgnorePresets(excludedPaths: Set<string>, repoRoot: string) {
+  const response = await prompts({
+    type: 'confirm',
+    name: 'usePresets',
+    message: 'Auto-ignore common configuration/non-code files? (lockfiles, tsconfig, eslint configs, etc.)',
+    initial: true
+  });
+
+  if (response.usePresets) {
+    const commonIgnores = [
+      'package-lock.json',
+      'yarn.lock',
+      'pnpm-lock.yaml',
+      'tsconfig.json',
+      'jest.config.js',
+      'jest.config.ts',
+      'webpack.config.js',
+      'next.config.js',
+      'next.config.mjs',
+      '.eslintrc.json',
+      '.eslintrc.js',
+      '.eslintrc',
+      '.prettierrc'
+    ];
+
+    for (const file of commonIgnores) {
+      if (fs.existsSync(path.join(repoRoot, file))) {
+        excludedPaths.add(file);
+      }
+    }
+  }
+}
+
+async function runFileBrowser(repoRoot: string, excludedPaths: Set<string>): Promise<void> {
+  let currentDir = repoRoot;
+  let browsing = true;
+
+  while (browsing) {
+    const relDir = path.relative(repoRoot, currentDir).replace(/\\/g, '/');
+    const displayDir = relDir === '' ? './ (Root)' : `./${relDir}`;
+
+    console.log(`\n📂 Current Folder: ${displayDir}`);
+
+    const activeExclusions = Array.from(excludedPaths);
+    const isParentExcluded = activeExclusions.some(p => {
+      return relDir.startsWith(p + '/') || relDir === p;
+    });
+
+    if (isParentExcluded) {
+      console.log('⚠️  Note: This folder is inside an EXCLUDED directory. Contents will be ignored.');
+    }
+
+    const entries = buildFileTree(currentDir, repoRoot);
+    if (entries.length === 0) {
+      console.log('   (Empty directory)');
+    }
+
+    const choices = [];
+    choices.push({ title: '✨ [Finish & Save Exclusions]', value: { action: 'done' } });
+    if (currentDir !== repoRoot) {
+      choices.push({ title: '⬆  Go Up (..)', value: { action: 'up' } });
+    }
+
+    for (const entry of entries) {
+      const isExcluded = excludedPaths.has(entry.relativePath);
+      const statusText = isExcluded ? '🚫 [EXCLUDED]' : '✅ [INCLUDED]';
+      if (entry.isDir) {
+        choices.push({
+          title: `${statusText} Folder: ${entry.name}/`,
+          value: { action: 'toggle', entry }
+        });
+        choices.push({
+          title: `   └─ 🔍 Browse ${entry.name}/ →`,
+          value: { action: 'browse', entry }
+        });
+      } else {
+        choices.push({
+          title: `${statusText} File: ${entry.name}`,
+          value: { action: 'toggle', entry }
+        });
+      }
+    }
+
+    const response = await prompts({
+      type: 'select',
+      name: 'result',
+      message: 'Select an entry to toggle or browse:',
+      choices,
+      initial: 0
+    });
+
+    if (response.result === undefined) {
+      console.log('⚠️  Selection cancelled. Keeping current exclusions.');
+      browsing = false;
+      break;
+    }
+
+    const { action, entry } = response.result;
+
+    if (action === 'done') {
+      browsing = false;
+    } else if (action === 'up') {
+      currentDir = path.dirname(currentDir);
+    } else if (action === 'browse') {
+      currentDir = entry.fullPath;
+    } else if (action === 'toggle') {
+      if (excludedPaths.has(entry.relativePath)) {
+        excludedPaths.delete(entry.relativePath);
+      } else {
+        excludedPaths.add(entry.relativePath);
+      }
+    }
+  }
+}
+
 // ─── Entry Point ───────────────────────────────────────────────────────────
 
 export async function handleInit() {
@@ -366,6 +520,8 @@ async function handleNewInit(cwd: string) {
   const repoPaths: string[] = []; // Track actual FS paths for detection
 
   // ── Step 3: Configure repos ───────────────────────────────────
+  const ignoredPaths: string[] = [];
+
   if (baseResponse.mode === 'embedded') {
     console.log(`\n🔍 Scanning for repositories in current folder...`);
     const subdirs = scanSubdirectories(cwd);
@@ -393,25 +549,39 @@ async function handleNewInit(cwd: string) {
       const repoName = dir === '.' ? baseResponse.projectName : dir;
       const relativePath = dir === '.' ? '.' : `./${dir}`;
       repos.push({ name: repoName, relative_path: relativePath } as EmbeddedRepoConfig);
-      repoPaths.push(path.resolve(cwd, relativePath));
+      
+      const absoluteRepoPath = path.resolve(cwd, relativePath);
+      repoPaths.push(absoluteRepoPath);
+
+      // Now configure exclusions for this repository folder
+      console.log(`\n📂 Exclusions setup for repository folder "${repoName}":`);
+      
+      const currentExcluded = new Set<string>();
+      // Pre-populate with auto-detected .gitignore patterns if they exist
+      const detectedIgnored = readGitIgnorePatterns(absoluteRepoPath);
+      for (const p of detectedIgnored) {
+        currentExcluded.add(p);
+      }
+
+      await showIgnorePresets(currentExcluded, absoluteRepoPath);
+      await runFileBrowser(absoluteRepoPath, currentExcluded);
+
+      for (const p of currentExcluded) {
+        if (dir !== '.') {
+          ignoredPaths.push(`${dir}/${p}`);
+        } else {
+          ignoredPaths.push(p);
+        }
+      }
     }
   } else {
-    const countResponse = await prompts({
-      type: 'number',
-      name: 'repoCount',
-      message: 'How many separate repositories does this brain serve?',
-      initial: 1,
-      min: 1
-    });
+    console.log(`\n📦 Standalone Mode — Configure repositories for this brain`);
+    let addAnother = true;
+    let repoIndex = 1;
 
-    if (countResponse.repoCount === undefined) {
-      console.log('❌ Initialization cancelled.');
-      return;
-    }
-
-    for (let i = 0; i < countResponse.repoCount; i++) {
-      console.log(`\n📦 Configuring Repository ${i + 1} of ${countResponse.repoCount}:`);
-      const defaultName = countResponse.repoCount === 1 ? baseResponse.projectName : `service-${i + 1}`;
+    while (addAnother) {
+      console.log(`\n📦 Configuring Repository #${repoIndex}:`);
+      const defaultName = repoIndex === 1 ? baseResponse.projectName : `service-${repoIndex}`;
 
       const repoResponse = await prompts([
         {
@@ -440,7 +610,41 @@ async function handleNewInit(cwd: string) {
       const pathKey = `REPO_${repoResponse.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
       repos.push({ name: repoResponse.name, path_key: pathKey } as StandaloneRepoConfig);
       envLines.push(`${pathKey}=${path.resolve(repoResponse.localPath)}`);
-      repoPaths.push(path.resolve(repoResponse.localPath));
+      
+      const absoluteRepoPath = path.resolve(repoResponse.localPath);
+      repoPaths.push(absoluteRepoPath);
+
+      // Now configure exclusions for this standalone repository
+      console.log(`\n📂 Exclusions setup for repository "${repoResponse.name}":`);
+      
+      const currentExcluded = new Set<string>();
+      // Pre-populate with auto-detected .gitignore patterns if they exist
+      const detectedIgnored = readGitIgnorePatterns(absoluteRepoPath);
+      for (const p of detectedIgnored) {
+        currentExcluded.add(p);
+      }
+
+      await showIgnorePresets(currentExcluded, absoluteRepoPath);
+      await runFileBrowser(absoluteRepoPath, currentExcluded);
+
+      for (const p of currentExcluded) {
+        ignoredPaths.push(p);
+      }
+
+      const loopResponse = await prompts({
+        type: 'confirm',
+        name: 'another',
+        message: 'Would you like to add another repository to this brain?',
+        initial: false
+      });
+
+      if (loopResponse.another === undefined) {
+        console.log('❌ Initialization cancelled.');
+        return;
+      }
+
+      addAnother = loopResponse.another;
+      repoIndex++;
     }
   }
 
@@ -473,45 +677,6 @@ async function handleNewInit(cwd: string) {
 
   envLines.push(`DEVELOPER_NAME=${devResponse.name.trim()}`);
   envLines.push(`DEVELOPER_EMAIL=${devResponse.email?.trim() || ''}`);
-
-  // ── Step 5: Ignored paths (auto from .gitignore) ──────────────
-  let ignoredPaths: string[] = [];
-  const detectedIgnored = aggregateIgnoredPaths(repoPaths);
-
-  if (detectedIgnored.length > 0) {
-    const preview = detectedIgnored.slice(0, 6).join(', ') + (detectedIgnored.length > 6 ? ', ...' : '');
-    console.log(`\n🚫 Auto-detected ${detectedIgnored.length} ignored paths from .gitignore files.`);
-    console.log(`   Default: ${preview}`);
-
-    const ignoreResponse = await prompts({
-      type: 'confirm',
-      name: 'useDetected',
-      message: 'Use these as ignored_paths?',
-      initial: true
-    });
-
-    if (ignoreResponse.useDetected) {
-      ignoredPaths = detectedIgnored;
-    } else {
-      const customResponse = await prompts({
-        type: 'list',
-        name: 'paths',
-        message: 'Custom ignored paths? (comma separated)',
-        initial: detectedIgnored.join(', '),
-        separator: ','
-      });
-      ignoredPaths = (customResponse.paths || []).map((p: string) => p.trim()).filter(Boolean);
-    }
-  } else {
-    const customResponse = await prompts({
-      type: 'text',
-      name: 'paths',
-      message: 'No .gitignore found. Ignored paths? (comma separated, leave empty to skip)',
-    });
-    if (customResponse.paths?.trim()) {
-      ignoredPaths = customResponse.paths.split(',').map((p: string) => p.trim()).filter(Boolean);
-    }
-  }
 
   // ── Step 6: Tech stack (auto from package.json) ───────────────
   let techStack: TechStack | undefined;
