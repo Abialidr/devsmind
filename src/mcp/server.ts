@@ -1,4 +1,4 @@
-﻿import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -104,6 +104,33 @@ function createMcpServer(): Server {
               }
             },
             required: ['devmind_path', 'node_id']
+          }
+        },
+        {
+          name: 'list_nodes',
+          description:
+            'List all nodes matching optional type and file path filters. Useful to discover all entities in a component, package, or directory.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: {
+                type: 'string',
+                description: 'Absolute path to the .devmind directory'
+              },
+              type: {
+                type: 'string',
+                description: 'Optional filter by exact node type (e.g. nest_controller, react_component, function)'
+              },
+              file_path: {
+                type: 'string',
+                description: 'Optional filter by file path substring (e.g. "src/components" or specific file name)'
+              },
+              include_deprecated: {
+                type: 'boolean',
+                description: 'Optional flag to include deprecated nodes (default: false)'
+              }
+            },
+            required: ['devmind_path']
           }
         },
         {
@@ -544,6 +571,20 @@ function createMcpServer(): Server {
 
           return {
             content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }]
+          };
+        }
+
+        case 'list_nodes': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const type = args.type ? String(args.type) : undefined;
+          const filePath = args.file_path ? String(args.file_path) : undefined;
+          const includeDeprecated = args.include_deprecated === true;
+
+          const db = getDatabase(devmindPath);
+          const nodes = db.listNodes({ type, file_path: filePath, include_deprecated: includeDeprecated });
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(nodes, null, 2) }]
           };
         }
 

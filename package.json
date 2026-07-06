@@ -1,6 +1,6 @@
 {
-  "name": "devsmind",
-  "version": "1.0.0",
+  "name": "devsmind-mcp",
+  "version": "1.0.1",
   "description": "DevsMind — Team AI Brain",
   "main": "dist/cli/index.js",
   "bin": {
@@ -13,11 +13,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.js",
+    "build": "node node_modules/typescript/bin/tsc && node scripts/copy-assets.js",
     "start": "tsx src/cli/index.ts start",
     "dev": "tsx src/cli/index.ts",
     "test": "echo \"Error: no test specified\" && exit 0",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "node node_modules/typescript/bin/tsc && node scripts/copy-assets.js"
   },
   "keywords": [
     "mcp",

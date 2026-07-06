@@ -430,6 +430,28 @@ export class DevMindDatabase {
     return stmt.all() as DbNode[];
   }
 
+  listNodes(filter?: { type?: string; file_path?: string; include_deprecated?: boolean }): DbNode[] {
+    let sql = 'SELECT * FROM nodes WHERE 1=1';
+    const params: any[] = [];
+
+    if (filter?.type) {
+      sql += ' AND type = ?';
+      params.push(filter.type);
+    }
+
+    if (filter?.file_path) {
+      sql += ' AND file_path LIKE ?';
+      params.push(`%${filter.file_path}%`);
+    }
+
+    if (!filter?.include_deprecated) {
+      sql += ' AND deprecated = 0';
+    }
+
+    const stmt = this.db.prepare(sql);
+    return stmt.all(...params) as DbNode[];
+  }
+
   getAllConnections(): DbConnection[] {
     const stmt = this.db.prepare('SELECT * FROM node_connections');
     return stmt.all() as DbConnection[];

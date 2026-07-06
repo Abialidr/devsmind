@@ -1,6 +1,6 @@
 # 🧠 DevsMind — Team AI Brain
 
-[![NPM Version](https://img.shields.io/npm/v/devsmind?color=blue)](https://www.npmjs.com/package/devsmind)
+[![NPM Version](https://img.shields.io/npm/v/devsmind-mcp?color=blue)](https://www.npmjs.com/package/devsmind-mcp)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/Abialidr/devsmind/blob/main/LICENSE)
 [![Awesome MCP](https://img.shields.io/badge/MCP-Awesome-purple)](https://modelcontextprotocol.io)
 
@@ -75,7 +75,7 @@ DevsMind supports two deployment topologies depending on your team's workflow:
 ### 1. Install DevsMind
 Install the CLI and MCP server globally via npm:
 ```bash
-npm install -g devsmind
+npm install -g devsmind-mcp
 ```
 
 ### 2. Initialize the Brain & Local Env
@@ -206,6 +206,7 @@ DevsMind tools are designed with **layered granularity**. The AI only pulls the 
 
 ### 🔍 Category 1: Discovery & Structure
 *   `get_node_summary`: Returns node type, location, connections count, history counts, and last update. (~50 tokens)
+*   `list_nodes`: List all nodes matching optional type and file path filters. Useful to discover all entities in a component, package, or directory.
 *   `get_node_graph`: Recursively retrieves connected nodes and relationships up to a specified depth (default: 6).
 *   `get_orphaned_nodes`: Identifies disconnected code nodes in the graph that have no incoming or outgoing connections.
 *   `get_visualizer_url`: Returns local browser URLs for opening the interactive 2D and 3D graph visualizers.
@@ -265,7 +266,7 @@ By placing `.devmind/config.json` and `.devmind/brain.db` in Git, you share the 
 ### Joining a Project
 When a new developer joins your team, they onboard instantly:
 1. Clone the project repository (which contains the `.devmind/` folder and `brain.db`).
-2. Install the package globally: `npm install -g devsmind`
+2. Install the package globally: `npm install -g devsmind-mcp`
 3. Create their local `.devmind/.env` from `.devmind/.env.example` and update their machine paths.
 4. Add the Workspace Rule to their IDE configuration.
 5. Launch: `devsmind start`
