@@ -86,17 +86,33 @@ export class DevMindDatabase {
   // --- Node Operations ---
 
   upsertNode(node: { id: string; type: string; name: string; file_path: string; signature?: string | null }) {
-    const stmt = this.db.prepare(`
-      INSERT INTO nodes (id, type, name, file_path, signature)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        type = excluded.type,
-        name = excluded.name,
-        file_path = excluded.file_path,
-        signature = COALESCE(excluded.signature, nodes.signature),
-        deprecated = 0
-    `);
-    stmt.run(node.id, node.type, node.name, node.file_path, node.signature || null);
+    const existing = this.getNode(node.id);
+    if (existing) {
+      let finalPath = existing.file_path;
+      const paths = existing.file_path.split(',').map(p => p.trim()).filter(Boolean);
+      const incoming = node.file_path.trim();
+      if (!paths.includes(incoming)) {
+        paths.push(incoming);
+        finalPath = paths.join(', ');
+      }
+
+      const stmt = this.db.prepare(`
+        UPDATE nodes
+        SET type = ?,
+            name = ?,
+            file_path = ?,
+            signature = COALESCE(?, signature),
+            deprecated = 0
+        WHERE id = ?
+      `);
+      stmt.run(node.type, node.name, finalPath, node.signature || null, node.id);
+    } else {
+      const stmt = this.db.prepare(`
+        INSERT INTO nodes (id, type, name, file_path, signature)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      stmt.run(node.id, node.type, node.name, node.file_path, node.signature || null);
+    }
   }
 
   getNode(id: string): DbNode | null {
@@ -424,7 +440,19 @@ export class DevMindDatabase {
     return stmt.all(wildcard, wildcard, wildcard) as DbNode[];
   }
 
-  getRecentChanges(hours: number = 24): { node_id: string; node_name: string; file_path: string; updated_at: string; reasoning: string }[] {
+  getRecentChanges(hours: number = 24, analyzeImpact: boolean = true): {
+    node_id: string;
+    node_name: string;
+    file_path: string;
+    updated_at: string;
+    reasoning: string;
+    downstream_impact?: {
+      node_id: string;
+      node_name: string;
+      file_path: string;
+      status: 'stale_warning' | 'already_updated';
+    }[];
+  }[] {
     const stmt = this.db.prepare(`
       SELECT h.node_id, n.name as node_name, n.file_path, h.updated_at, h.reasoning
       FROM history h
@@ -432,8 +460,32 @@ export class DevMindDatabase {
       WHERE h.updated_at >= datetime('now', ?)
       ORDER BY h.updated_at DESC
     `);
-    // SQLite datetime('now', '-24 hours') style modifier
-    return stmt.all(`-${hours} hours`) as { node_id: string; node_name: string; file_path: string; updated_at: string; reasoning: string }[];
+    const recentChanges = stmt.all(`-${hours} hours`) as any[];
+
+    if (!analyzeImpact) {
+      return recentChanges;
+    }
+
+    const modifiedSet = new Set(recentChanges.map(c => c.node_id));
+
+    const callersStmt = this.db.prepare(`
+      SELECT n.id as node_id, n.name as node_name, n.file_path
+      FROM nodes n
+      JOIN node_connections c ON n.id = c.source_node_id
+      WHERE c.target_node_id = ?
+    `);
+
+    for (const change of recentChanges) {
+      const callers = callersStmt.all(change.node_id) as any[];
+      change.downstream_impact = callers.map(caller => ({
+        node_id: caller.node_id,
+        node_name: caller.node_name,
+        file_path: caller.file_path,
+        status: modifiedSet.has(caller.node_id) ? 'already_updated' : 'stale_warning'
+      }));
+    }
+
+    return recentChanges;
   }
 
   getDeveloperActivity(developer: string, limit: number = 50): { node_id: string; node_name: string; updated_at: string; reasoning: string }[] {
@@ -549,12 +601,17 @@ export class DevMindDatabase {
       // 2. Check if file path does not exist on disk
       let fileMissing = false;
       if (node.file_path) {
-        const resolvedPath = path.isAbsolute(node.file_path)
-          ? node.file_path
-          : path.resolve(workspaceRoot, node.file_path);
-        
-        if (!fs.existsSync(resolvedPath)) {
-          fileMissing = true;
+        const paths = node.file_path.split(',').map(p => p.trim()).filter(Boolean);
+        if (paths.length > 0) {
+          const allMissing = paths.every(p => {
+            const resolvedPath = path.isAbsolute(p)
+              ? p
+              : path.resolve(workspaceRoot, p);
+            return !fs.existsSync(resolvedPath);
+          });
+          if (allMissing) {
+            fileMissing = true;
+          }
         }
       }
 

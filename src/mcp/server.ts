@@ -455,12 +455,13 @@ function createMcpServer(): Server {
         },
         {
           name: 'get_recent_changes',
-          description: 'Get team modifications and history updates over the last N hours.',
+          description: 'Get team modifications and history updates over the last N hours, with optional downstream impact analysis.',
           inputSchema: {
             type: 'object',
             properties: {
               devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
-              hours: { type: 'number', description: 'Lookback window in hours (optional, default 24)' }
+              hours: { type: 'number', description: 'Lookback window in hours (optional, default 24)' },
+              analyze_impact: { type: 'boolean', description: 'If true, checks for downstream callers of changed nodes (optional, default true)' }
             },
             required: ['devmind_path']
           }
@@ -905,8 +906,9 @@ function createMcpServer(): Server {
         case 'get_recent_changes': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
           const hours = args.hours ? Number(args.hours) : 24;
+          const analyzeImpact = args.analyze_impact !== false;
           const db = getDatabase(devmindPath);
-          const changes = db.getRecentChanges(hours);
+          const changes = db.getRecentChanges(hours, analyzeImpact);
           return {
             content: [{ type: 'text', text: JSON.stringify(changes, null, 2) }]
           };
