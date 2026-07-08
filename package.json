@@ -4,7 +4,7 @@
   "description": "DevsMind — Team AI Brain",
   "main": "dist/cli/index.js",
   "bin": {
-    "devsmind": "./dist/cli/index.js"
+    "devsmind": "dist/cli/index.js"
   },
   "type": "commonjs",
   "files": [
