@@ -733,7 +733,8 @@ CRITICAL RULES:
 function filterCandidates(codeSnapshot: string, allNodeIds: string[]): string[] {
   const lowerCode = codeSnapshot.toLowerCase();
   return allNodeIds.filter(id => {
-    const shortName = id.includes('.') ? id.split('.').pop()! : id;
+    const symbolName = id.includes('#') ? id.split('#').pop()! : id;
+    const shortName = symbolName.includes('.') ? symbolName.split('.').pop()! : symbolName;
     if (!shortName || shortName.trim().length === 0) return false;
     if (shortName.length < 3) return false;
     return lowerCode.includes(shortName.toLowerCase());
@@ -941,8 +942,12 @@ export async function runBackgroundIndexing(opts: {
             const pctDone = fileLines > 0 ? Math.round((parseInt(lineNum) / fileLines) * 100) : 0;
             const lineTag = lineNum !== '?' ? `\x1B[90mL${lineNum}/${fileLines} (${pctDone}% through file)\x1B[0m` : `\x1B[90m(line unknown)\x1B[0m`;
             progress.log(`\x1B[32m+\x1B[0m \x1B[1m${n.name}\x1B[0m \x1B[90m[${n.type}]\x1B[0m  ${lineTag}`);
+            const workspaceRoot = path.dirname(resolvedDevmind);
+            const relPath = path.relative(workspaceRoot, fileObj.absolutePath).replace(/\\/g, '/');
+            const qualifiedId = `${relPath}#${n.node_id}`;
+
             db.upsertNode({
-              id: n.node_id,
+              id: qualifiedId,
               name: n.name,
               type: n.type,
               file_path: fileObj.absolutePath,
@@ -951,7 +956,7 @@ export async function runBackgroundIndexing(opts: {
             newNodesCount++;
             if (n.code_snapshot) {
               db.updateHistory({
-                node_id: n.node_id,
+                node_id: qualifiedId,
                 code_snapshot: n.code_snapshot,
                 reasoning: {
                   what_changed: 'Initial code extraction during background indexing',

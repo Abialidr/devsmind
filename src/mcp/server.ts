@@ -615,10 +615,15 @@ function createMcpServer(): Server {
 
         case 'update_history': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
-          const nodeId = String(args.node_id);
+          const rawNodeId = String(args.node_id);
           const filePath = String(args.file_path);
           const codeSnapshot = String(args.code_snapshot);
           const reasoning = args.reasoning as any;
+
+          const workspaceRoot = path.dirname(devmindPath);
+          const relPath = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
+          const prefix = `${relPath}#`;
+          const nodeId = rawNodeId.includes('#') ? rawNodeId : `${prefix}${rawNodeId}`;
 
           let nodeName = args.name ? String(args.name) : undefined;
           let nodeType = args.type ? String(args.type) : undefined;
@@ -627,10 +632,10 @@ function createMcpServer(): Server {
 
           // Infer name and type if not provided
           if (!nodeName) {
-            nodeName = nodeId.includes('.') ? nodeId.split('.').pop()! : nodeId;
+            nodeName = rawNodeId.includes('.') ? rawNodeId.split('.').pop()! : rawNodeId;
           }
           if (!nodeType) {
-            nodeType = nodeId.includes('.') ? 'method' : 'function';
+            nodeType = rawNodeId.includes('.') ? 'method' : 'function';
           }
 
           const db = getDatabase(devmindPath);
@@ -809,16 +814,24 @@ function createMcpServer(): Server {
 
         case 'add_node': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
+          const rawNodeId = String(args.node_id);
+          const filePath = String(args.file_path);
+
+          const workspaceRoot = path.dirname(devmindPath);
+          const relPath = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
+          const prefix = `${relPath}#`;
+          const nodeId = rawNodeId.includes('#') ? rawNodeId : `${prefix}${rawNodeId}`;
+
           const db = getDatabase(devmindPath);
           db.upsertNode({
-            id: String(args.node_id),
+            id: nodeId,
             name: String(args.name),
             type: String(args.type),
-            file_path: String(args.file_path),
+            file_path: filePath,
             signature: args.signature ? String(args.signature) : null
           });
           return {
-            content: [{ type: 'text', text: JSON.stringify({ added: true, node_id: args.node_id }) }]
+            content: [{ type: 'text', text: JSON.stringify({ added: true, node_id: nodeId }) }]
           };
         }
 

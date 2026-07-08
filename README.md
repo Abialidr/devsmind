@@ -42,23 +42,28 @@ Git tells you **WHAT** changed. **DevsMind tells your AI agent WHY it changed, W
 
 ## 🛠️ Architecture: The `.devmind/` Directory
 
-Running `devsmind init` creates a `.devmind/` directory in your workspace. This folder contains the entire brain:
+Running `devsmind init` creates a `.devmind/` directory in your workspace. This folder contains the configuration, distributed graph database, and local cache:
 
 ```
 .devmind/
   ├── config.json     ← Project metadata & repository mapping (Committed to Git)
   ├── .env            ← Local developer machine paths (Gitignored)
-  └── brain.db        ← SQLite database with the knowledge graph (Committed to Git)
+  ├── brain.db        ← Metadata-only SQLite cache database (Gitignored)
+  ├── history/        ← Distributed change logs & code snapshots as JSON (Committed to Git)
+  │     └── [id].json
+  └── graph/          ← Distributed graph structure JSON files (Committed to Git)
+        └── [repo_name]/
+              └── [path].json
 ```
 
 ### Flexibility: Where should the brain live?
 
 DevsMind supports two deployment topologies depending on your team's workflow:
 
-*   **Option A: Inside the workspace/project root directory (Committed to Git, shared with team)**
+*   **Option A: Inside the workspace/project root directory (Shared with team)**
     ```
     c:\work\my-project\
-      ├── .devmind\              ← Brain lives inside the project root directory
+      ├── .devmind\              ← Config and distributed JSON database live here
       ├── backend-service\
       └── frontend-web\
     ```
@@ -134,31 +139,17 @@ Index the entire workspace upfront so the AI knows every type, schema, and API c
 You have two ways to run the upfront index:
 
 #### Option A: Background CLI Indexing (Recommended — Faster & Free)
-Run the indexer directly in your local terminal using a cloud model (Gemini) or a local offline model (Ollama). This uses **zero tokens** in your active IDE chat session and runs in the background.
+Run the indexer directly in your local terminal using a background LLM provider. This runs in the background and uses **zero tokens** in your active IDE chat session.
 
-* **Using Gemini 2.5 Flash (Free Cloud Tier)**:
-  Obtain a free API key from [Google AI Studio](https://aistudio.google.com/) and run:
-  ```bash
-  devsmind index --run --provider gemini --key YOUR_API_KEY
-  ```
-  *(The runner automatically rate-limits itself to stay within the 15 RPM free tier limits).*
+**Example Command:**
+```bash
+devsmind index --run --provider gemini --model gemini-2.5-flash --key YOUR_API_KEY
+```
 
-* **Using Local Ollama (100% Offline & Free)**:
-  Make sure Ollama is running, pull the model (`ollama pull qwen2.5-coder`), and run:
-  ```bash
-  devsmind index --run --provider ollama --model qwen2.5-coder
-  ```
-
-* **Customizing Models & Settings**:
-  You can pass any model supported by the provider using the `--model` flag. For example:
-  * Run with the larger, smarter cloud model:
-    ```bash
-    devsmind index --run --provider gemini --model gemini-2.0-pro --key YOUR_API_KEY
-    ```
-  * Run with a different local Ollama model (e.g. `llama3.1`):
-    ```bash
-    devsmind index --run --provider ollama --model llama3.1
-    ```
+**Supported Providers (`--provider`):**
+*   `gemini` (Default. Free tier rate-limits to stay within 15 RPM).
+*   `vertex` (Google Cloud Vertex AI).
+*   `ollama` (For local offline models, e.g. `--model qwen2.5-coder`).
 
 #### Option B: In-Chat Agent Indexing
 Tell your AI assistant inside your IDE chat:
@@ -194,17 +185,18 @@ Regardless of whether you choose Option A (CLI) or Option B (In-Chat), the follo
 
 ## 🗄️ Database Schema: `.devmind/brain.db`
 
-The brain is backed by a local SQLite database containing exactly three tables:
+The local SQLite database (`brain.db`) acts as a metadata cache. The full database schema consists of three tables:
 
 ### 1. `nodes` (Code Entities)
-Contains structural identifiers. **No code snapshots live here.**
+Contains structural identifiers.
 ```sql
 CREATE TABLE nodes (
   id          TEXT PRIMARY KEY,  -- e.g., "CartService.applyPromoCode"
-  type        TEXT,              -- Taxonomy type (e.g., nest_controller, route_handler)
-  name        TEXT,              -- Friendly display name
-  file_path   TEXT,              -- Source file path
+  type        TEXT NOT NULL,     -- Taxonomy type (e.g., nest_controller, route_handler)
+  name        TEXT NOT NULL,     -- Friendly display name
+  file_path   TEXT NOT NULL,     -- Source file path
   signature   TEXT,              -- Param types & return value signature
+  deprecated  INTEGER DEFAULT 0, -- 1 if the node has been deprecated/removed
   created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -219,24 +211,26 @@ CREATE TABLE node_connections (
   FOREIGN KEY (source_node_id) REFERENCES nodes (id) ON DELETE CASCADE,
   FOREIGN KEY (target_node_id) REFERENCES nodes (id) ON DELETE CASCADE
 );
--- Direction: source_node USES target_node (or target_node IS USED BY source_node)
+-- Direction: source_node USES target_node
 ```
 
 ### 3. `history` (AI Change Logs)
-Holds snapshots and the evolutionary story.
+Holds metadata references to version histories.
 ```sql
 CREATE TABLE history (
-  id             TEXT PRIMARY KEY,
-  node_id        TEXT,       -- Associated node
-  session_id     TEXT,       -- Session key (optional)
-  created_at     DATETIME,   -- When version was opened
-  updated_at     DATETIME,   -- When version was last updated
-  code_snapshot  TEXT,       -- Source code of this entity at this point in time
-  reasoning      TEXT,       -- JSON string of AI-written history logs
+  id             TEXT PRIMARY KEY,  -- UUID of the history block
+  node_id        TEXT NOT NULL,     -- Associated node
+  session_id     TEXT NOT NULL,     -- Session key
+  created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+  code_snapshot  TEXT NOT NULL,     -- Always empty string (stored in history/[id].json)
+  reasoning      TEXT NOT NULL,     -- Always empty string (stored in history/[id].json)
   FOREIGN KEY (node_id) REFERENCES nodes (id) ON DELETE CASCADE
 );
 ```
 > ⏱️ **Session Boundary Rule**: If the AI updates a function, it checks the last history log. If `updated_at` is less than **1 hour ago**, it updates the snapshot and reasoning in-place (same session). If older than 1 hour, it inserts a new history record (new session).
+>
+> 💾 **JSON Storage Note**: In version 2.0.0, the actual code snapshots and AI change reasonings are stored in `.devmind/history/[id].json` to resolve Git merge conflicts, while the SQLite database holds empty strings for `code_snapshot` and `reasoning`.
 
 ---
 
@@ -305,13 +299,27 @@ By placing `.devmind/config.json` and `.devmind/brain.db` in Git, you share the 
 
 ### Joining a Project
 When a new developer joins your team, they onboard instantly:
-1. Clone the project repository (which contains the `.devmind/` folder and `brain.db`).
+1. Clone the project repository (which contains `.devmind/config.json`, `.devmind/history/`, and `.devmind/graph/`).
 2. Install the package globally: `npm install -g devsmind-mcp`
-3. Create their local `.devmind/.env` from `.devmind/.env.example` and update their machine paths.
-4. Add the Workspace Rule to their IDE configuration.
-5. Launch: `devsmind start`
+3. Initialize the local environment and generate local cache database by running: `devsmind init`
+4. Copy the workspace rule printed by `devsmind rule` into their IDE configuration rules.
+5. Launch the server: `devsmind start` (this automatically syncs and reconstructs the SQLite database cache from the local JSON files on startup).
 
 The new developer's AI agent now possesses the full architectural context and decision history of your senior team.
+
+---
+
+## Changelog
+
+### Version 2.0.0 (Current Breaking Release)
+*   **Git-Friendly Distributed JSON Storage**: Solved Git binary merge conflicts by moving all massive code snapshots and reasoning logs to `.devmind/history/[id].json` and graph structures to `.devmind/graph/[repo_name]/[path].json`. This replaces the monolithic `brain.db` database storage completely.
+*   **Metadata-Only SQLite Cache**: Compacted the local SQLite database (`brain.db`) to store only structural metadata. Wiped all heavy text blobs, and added `brain.db` to `.gitignore`.
+*   **Auto-Sync & Reconstruction**: Added startup auto-sync. The database constructor automatically reconstructs your entire local SQLite database from the disk JSONs in less than 2 seconds on startup.
+*   **Env-Mapped Repo-Relative Paths**: Resolved cross-drive crashes and folder escape issues on Windows. Replaced relative dot paths in JSONs with clean repo placeholders (`{repo_name}/relativePath`) which are resolved dynamically using absolute paths configured in your local `.env` file.
+*   **Safe Import Transaction Toggles**: Disables foreign key checks during bulk syncing (`syncFromDisk()`) and edge connections (`addConnection()`) to prevent race conditions during out-of-order indexing.
+
+### Version 1.2.2
+*   **Node.js v24 LTS & npm Dependency Conflict Resolution**: Fixed native compilation conflicts (like `better-sqlite3` and `node-gyp` errors) that crashed on Node v24, ensuring DevsMind builds and installs out-of-the-box on both Node v22 and Node v24 environments.
 
 ---
 

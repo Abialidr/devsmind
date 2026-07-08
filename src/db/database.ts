@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
 import { INIT_SCHEMA_SQL, DbNode, DbHistory, DbConnection } from './schema';
+import { loadProjectContext, resolveRepoPath, ProjectContext } from '../utils/config';
 
 function compressText(text: string): Buffer {
   return zlib.deflateSync(Buffer.from(text, 'utf-8'));
@@ -50,8 +51,11 @@ export function formatReasoning(r: string | ReasoningObject): string {
 
 export class DevMindDatabase {
   private db: Database.Database;
+  private dbPath: string;
+  private context: ProjectContext | null = null;
 
   constructor(dbPath: string) {
+    this.dbPath = dbPath;
     // Open SQLite database
     this.db = new Database(dbPath);
     
@@ -60,6 +64,16 @@ export class DevMindDatabase {
     
     // Initialize schema
     this.initSchema();
+
+    // Load project context from .devmind directory path
+    try {
+      this.context = loadProjectContext(path.dirname(dbPath));
+    } catch (err) {
+      // Ignore context errors (e.g. running from scratch scripts)
+    }
+
+    // Auto-sync history and graph from disk JSONs
+    this.syncFromDisk();
   }
 
   private initSchema() {
@@ -113,26 +127,47 @@ export class DevMindDatabase {
       `);
       stmt.run(node.id, node.type, node.name, node.file_path, node.signature || null);
     }
+    this.writeGraphToDisk(node.file_path);
   }
 
   getNode(id: string): DbNode | null {
     const stmt = this.db.prepare('SELECT * FROM nodes WHERE id = ?');
-    return (stmt.get(id) as DbNode) || null;
+    const direct = stmt.get(id) as DbNode;
+    if (direct) return direct;
+
+    if (!id.includes('#')) {
+      const suffixStmt = this.db.prepare('SELECT * FROM nodes WHERE id LIKE ? AND deprecated = 0');
+      const matches = suffixStmt.all(`%#${id}`) as DbNode[];
+      if (matches.length === 1) {
+        return matches[0];
+      }
+    }
+    return null;
   }
 
   deleteNode(id: string) {
+    const node = this.getNode(id);
+    const resolvedId = node ? node.id : id;
     const stmt = this.db.prepare('DELETE FROM nodes WHERE id = ?');
-    stmt.run(id);
+    stmt.run(resolvedId);
+    if (node && node.file_path) {
+      this.writeGraphToDisk(node.file_path);
+    }
   }
 
   deprecateNode(id: string) {
+    const node = this.getNode(id);
+    const resolvedId = node ? node.id : id;
     const updateStmt = this.db.prepare('UPDATE nodes SET deprecated = 1 WHERE id = ?');
     const deleteConnStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? OR target_node_id = ?');
     const tx = this.db.transaction(() => {
-      updateStmt.run(id);
-      deleteConnStmt.run(id, id);
+      updateStmt.run(resolvedId);
+      deleteConnStmt.run(resolvedId, resolvedId);
     });
     tx();
+    if (node && node.file_path) {
+      this.writeGraphToDisk(node.file_path);
+    }
   }
 
   renameNode(oldId: string, newId: string, newName?: string) {
@@ -173,6 +208,9 @@ export class DevMindDatabase {
       });
 
       runTx();
+      if (node.file_path) {
+        this.writeGraphToDisk(node.file_path);
+      }
     } finally {
       this.db.pragma('foreign_keys = ON');
     }
@@ -181,30 +219,44 @@ export class DevMindDatabase {
   // --- Connection Operations ---
 
   addConnection(sourceNodeId: string, targetNodeId: string) {
+    const srcNode = this.getNode(sourceNodeId);
+    const tgtNode = this.getNode(targetNodeId);
+    const resolvedSrc = srcNode ? srcNode.id : sourceNodeId;
+    const resolvedTgt = tgtNode ? tgtNode.id : targetNodeId;
+    
+    this.db.pragma('foreign_keys = OFF');
     try {
       const stmt = this.db.prepare(`
         INSERT OR IGNORE INTO node_connections (source_node_id, target_node_id)
         VALUES (?, ?)
       `);
-      stmt.run(sourceNodeId, targetNodeId);
-    } catch (err) {
-      if (err instanceof Error && err.message.includes('FOREIGN KEY')) {
-        // Ignore foreign key violations (e.g. target node defined in a file not indexed yet, or external library)
-        return;
+      stmt.run(resolvedSrc, resolvedTgt);
+      if (srcNode && srcNode.file_path) {
+        this.writeGraphToDisk(srcNode.file_path);
       }
-      throw err;
+    } finally {
+      this.db.pragma('foreign_keys = ON');
     }
   }
 
   removeConnection(sourceNodeId: string, targetNodeId: string) {
+    const srcNode = this.getNode(sourceNodeId);
+    const tgtNode = this.getNode(targetNodeId);
+    const resolvedSrc = srcNode ? srcNode.id : sourceNodeId;
+    const resolvedTgt = tgtNode ? tgtNode.id : targetNodeId;
     const stmt = this.db.prepare(`
       DELETE FROM node_connections
       WHERE source_node_id = ? AND target_node_id = ?
     `);
-    stmt.run(sourceNodeId, targetNodeId);
+    stmt.run(resolvedSrc, resolvedTgt);
+    if (srcNode && srcNode.file_path) {
+      this.writeGraphToDisk(srcNode.file_path);
+    }
   }
 
   getConnections(nodeId: string): { uses: DbNode[]; usedBy: DbNode[] } {
+    const node = this.getNode(nodeId);
+    const resolvedId = node ? node.id : nodeId;
     const usesStmt = this.db.prepare(`
       SELECT n.* FROM nodes n
       JOIN node_connections c ON n.id = c.target_node_id
@@ -217,78 +269,67 @@ export class DevMindDatabase {
     `);
 
     return {
-      uses: usesStmt.all(nodeId) as DbNode[],
-      usedBy: usedByStmt.all(nodeId) as DbNode[]
+      uses: usesStmt.all(resolvedId) as DbNode[],
+      usedBy: usedByStmt.all(resolvedId) as DbNode[]
     };
   }
 
   // --- History Operations ---
 
   getLatestHistory(nodeId: string): DbHistory | null {
+    const node = this.getNode(nodeId);
+    const resolvedId = node ? node.id : nodeId;
     const stmt = this.db.prepare(`
-      SELECT * FROM history
+      SELECT id, node_id, session_id, created_at, updated_at FROM history
       WHERE node_id = ?
       ORDER BY updated_at DESC
       LIMIT 1
     `);
-    const row = stmt.get(nodeId) as any;
+    const row = stmt.get(resolvedId) as any;
     if (!row) return null;
-    return {
-      ...row,
-      code_snapshot: decompressText(row.code_snapshot),
-      reasoning: decompressText(row.reasoning)
-    };
+    return this.populateHistoryFromDisk(row);
   }
 
   listHistory(nodeId: string): Omit<DbHistory, 'code_snapshot' | 'reasoning'>[] {
+    const node = this.getNode(nodeId);
+    const resolvedId = node ? node.id : nodeId;
     const stmt = this.db.prepare(`
       SELECT id, node_id, session_id, created_at, updated_at
       FROM history
       WHERE node_id = ?
       ORDER BY updated_at DESC
     `);
-    return stmt.all(nodeId) as Omit<DbHistory, 'code_snapshot' | 'reasoning'>[];
+    return stmt.all(resolvedId) as Omit<DbHistory, 'code_snapshot' | 'reasoning'>[];
   }
 
   getHistoryEntry(id: string): DbHistory | null {
-    const stmt = this.db.prepare('SELECT * FROM history WHERE id = ?');
+    const stmt = this.db.prepare('SELECT id, node_id, session_id, created_at, updated_at FROM history WHERE id = ?');
     const row = stmt.get(id) as any;
     if (!row) return null;
-    return {
-      ...row,
-      code_snapshot: decompressText(row.code_snapshot),
-      reasoning: decompressText(row.reasoning)
-    };
+    return this.populateHistoryFromDisk(row);
   }
 
   getFullHistory(nodeId: string): DbHistory[] {
+    const node = this.getNode(nodeId);
+    const resolvedId = node ? node.id : nodeId;
     const stmt = this.db.prepare(`
-      SELECT *
+      SELECT id, node_id, session_id, created_at, updated_at
       FROM history
       WHERE node_id = ?
       ORDER BY updated_at DESC
     `);
-    const rows = stmt.all(nodeId) as any[];
-    return rows.map(row => ({
-      ...row,
-      code_snapshot: decompressText(row.code_snapshot),
-      reasoning: decompressText(row.reasoning)
-    }));
+    const rows = stmt.all(resolvedId) as any[];
+    return rows.map(row => this.populateHistoryFromDisk(row));
   }
 
   getLatestCode(nodeId: string): { code_snapshot: string; updated_at: string } | null {
-    const stmt = this.db.prepare(`
-      SELECT code_snapshot, updated_at
-      FROM history
-      WHERE node_id = ?
-      ORDER BY updated_at DESC
-      LIMIT 1
-    `);
-    const row = stmt.get(nodeId) as any;
-    if (!row) return null;
+    const node = this.getNode(nodeId);
+    const resolvedId = node ? node.id : nodeId;
+    const history = this.getLatestHistory(resolvedId);
+    if (!history) return null;
     return {
-      updated_at: row.updated_at,
-      code_snapshot: decompressText(row.code_snapshot)
+      updated_at: history.updated_at,
+      code_snapshot: history.code_snapshot
     };
   }
 
@@ -375,13 +416,15 @@ export class DevMindDatabase {
     session_id?: string;
   }): DbHistory {
     const { node_id, code_snapshot, reasoning } = params;
+    const node = this.getNode(node_id);
+    const resolvedId = node ? node.id : node_id;
     const formattedReasoning = formatReasoning(reasoning);
     const nowStr = new Date().toISOString();
 
     const compressedCode = compressText(code_snapshot);
 
     // 1-hour session boundary rule check
-    const latest = this.getLatestHistory(node_id);
+    const latest = this.getLatestHistory(resolvedId);
     if (latest) {
       const lastUpdate = new Date(latest.updated_at).getTime();
       const nowTime = new Date(nowStr).getTime();
@@ -391,11 +434,14 @@ export class DevMindDatabase {
       if (diffMs < 3600000) {
         const updateStmt = this.db.prepare(`
           UPDATE history
-          SET code_snapshot = ?, reasoning = ?, updated_at = ?
+          SET code_snapshot = '', reasoning = '', updated_at = ?
           WHERE id = ?
         `);
-        updateStmt.run(compressedCode, formattedReasoning, nowStr, latest.id);
+        updateStmt.run(nowStr, latest.id);
         
+        // Write/Update on disk
+        this.writeHistoryToDisk(latest.id, resolvedId, latest.session_id, latest.created_at, nowStr, code_snapshot, formattedReasoning);
+
         return {
           ...latest,
           code_snapshot,
@@ -411,13 +457,16 @@ export class DevMindDatabase {
 
     const insertStmt = this.db.prepare(`
       INSERT INTO history (id, node_id, session_id, created_at, updated_at, code_snapshot, reasoning)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, '', '')
     `);
-    insertStmt.run(newId, node_id, sessionId, nowStr, nowStr, compressedCode, formattedReasoning);
+    insertStmt.run(newId, resolvedId, sessionId, nowStr, nowStr);
+
+    // Write to disk
+    this.writeHistoryToDisk(newId, resolvedId, sessionId, nowStr, nowStr, code_snapshot, formattedReasoning);
 
     return {
       id: newId,
-      node_id,
+      node_id: resolvedId,
       session_id: sessionId,
       created_at: nowStr,
       updated_at: nowStr,
@@ -579,13 +628,14 @@ export class DevMindDatabase {
   pruneSpuriousNodes(workspaceRoot: string): { prunedCount: number; prunedNodes: string[] } {
     const spuriousNames = new Set([
       'promise', 'map', 'set', 'json', 'console', 'error', 'object', 'function', 'array', 'string', 'number', 'boolean', 'regexp', 'date', 'math',
-      'any', 'void', 'unknown', 'never', 'null', 'undefined', 'dict', 'list'
+      'any', 'void', 'unknown', 'never', 'null', 'undefined', 'dict', 'list',
+      'data', 'useeffect', 'val', 'temp', 'result', 'item', 'key', 'value', 'err', 'req', 'res', 'args', 'params', 'response', 'request'
     ]);
 
-    // Get nodes with 0 history entries that are not already deprecated
+    // Get all active nodes (including those with history) to check for missing files or spurious names
     const stmt = this.db.prepare(`
       SELECT id, name, file_path FROM nodes
-      WHERE deprecated = 0 AND id NOT IN (SELECT DISTINCT node_id FROM history)
+      WHERE deprecated = 0
     `);
     const candidates = stmt.all() as { id: string; name: string; file_path: string }[];
 
@@ -624,10 +674,12 @@ export class DevMindDatabase {
     if (idsToDelete.length > 0) {
       const updateStmt = this.db.prepare('UPDATE nodes SET deprecated = 1 WHERE id = ?');
       const deleteConnStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? OR target_node_id = ?');
+      const deleteHistoryStmt = this.db.prepare('DELETE FROM history WHERE node_id = ?');
       const deprecateTx = this.db.transaction((ids: string[]) => {
         for (const id of ids) {
           updateStmt.run(id);
           deleteConnStmt.run(id, id);
+          deleteHistoryStmt.run(id);
         }
       });
       deprecateTx(idsToDelete);
@@ -637,5 +689,301 @@ export class DevMindDatabase {
       prunedCount: idsToDelete.length,
       prunedNodes: namesDeleted
     };
+  }
+
+  private populateHistoryFromDisk(row: any): DbHistory {
+    try {
+      const historyDir = path.join(path.dirname(this.dbPath), 'history');
+      const filePath = path.join(historyDir, `${row.id}.json`);
+      if (fs.existsSync(filePath)) {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        return {
+          ...row,
+          code_snapshot: data.code_snapshot || '',
+          reasoning: typeof data.reasoning === 'string' ? data.reasoning : formatReasoning(data.reasoning || '')
+        };
+      }
+    } catch (err) {
+      // ignore errors
+    }
+    return {
+      ...row,
+      code_snapshot: '',
+      reasoning: ''
+    };
+  }
+
+  private writeHistoryToDisk(
+    id: string,
+    nodeId: string,
+    sessionId: string,
+    createdAt: string,
+    updatedAt: string,
+    codeSnapshot: string,
+    reasoning: string
+  ) {
+    try {
+      const historyDir = path.join(path.dirname(this.dbPath), 'history');
+      if (!fs.existsSync(historyDir)) {
+        fs.mkdirSync(historyDir, { recursive: true });
+      }
+
+      const node = this.getNode(nodeId);
+      const nodeMetadata = node ? {
+        name: node.name,
+        type: node.type,
+        file_path: node.file_path,
+        signature: node.signature
+      } : null;
+
+      const data = {
+        id,
+        node_id: nodeId,
+        node_metadata: nodeMetadata,
+        session_id: sessionId,
+        created_at: createdAt,
+        updated_at: updatedAt,
+        code_snapshot: codeSnapshot,
+        reasoning
+      };
+
+      const filePath = path.join(historyDir, `${id}.json`);
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('⚠️ SQLite warning: Failed to write history JSON to disk:', err);
+    }
+  }
+
+  private toRepoRelativePath(absolutePath: string): string {
+    if (!absolutePath || !this.context) return absolutePath;
+    const abs = path.resolve(absolutePath).replace(/\\/g, '/');
+    
+    for (const repo of this.context.config.repos) {
+      const repoPath = resolveRepoPath(this.context, repo.name);
+      if (repoPath) {
+        const normalizedRepoPath = path.resolve(repoPath).replace(/\\/g, '/');
+        if (abs.startsWith(normalizedRepoPath)) {
+          const relative = path.relative(normalizedRepoPath, abs).replace(/\\/g, '/');
+          return `{${repo.name}}/${relative}`;
+        }
+      }
+    }
+    
+    // Fallback: resolve relative to workspace root
+    const workspaceRoot = path.dirname(this.dbPath);
+    return path.relative(workspaceRoot, absolutePath).replace(/\\/g, '/');
+  }
+
+  private toAbsolutePath(repoRelativePath: string): string {
+    if (!repoRelativePath) return repoRelativePath;
+    const workspaceRoot = path.dirname(this.dbPath);
+    
+    const match = repoRelativePath.match(/^\{([^}]+)\}\/(.*)$/);
+    if (match && this.context) {
+      const repoName = match[1];
+      const relativePath = match[2];
+      const repoPath = resolveRepoPath(this.context, repoName);
+      if (repoPath) {
+        return path.resolve(repoPath, relativePath);
+      }
+    }
+    
+    // Fallback: resolve relative to workspace root
+    return path.resolve(workspaceRoot, repoRelativePath);
+  }
+
+  syncFromDisk() {
+    this.db.pragma('foreign_keys = OFF');
+    try {
+      const workspaceRoot = path.dirname(this.dbPath);
+      
+      // 1. Sync History JSONs
+      const historyDir = path.join(workspaceRoot, 'history');
+      if (fs.existsSync(historyDir)) {
+        const files = fs.readdirSync(historyDir).filter(f => f.endsWith('.json'));
+        if (files.length > 0) {
+          const checkHistoryStmt = this.db.prepare('SELECT id FROM history WHERE id = ?');
+          const checkNodeStmt = this.db.prepare('SELECT id FROM nodes WHERE id = ?');
+          const insertNodeStmt = this.db.prepare(`
+            INSERT INTO nodes (id, type, name, file_path, signature, deprecated)
+            VALUES (?, ?, ?, ?, ?, 0)
+          `);
+          const insertHistoryStmt = this.db.prepare(`
+            INSERT INTO history (id, node_id, session_id, created_at, updated_at, code_snapshot, reasoning)
+            VALUES (?, ?, ?, ?, ?, '', '')
+          `);
+
+          const syncHistoryTx = this.db.transaction(() => {
+            for (const file of files) {
+              try {
+                const filePath = path.join(historyDir, file);
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                if (!data.id || !data.node_id) continue;
+
+                if (checkHistoryStmt.get(data.id)) continue;
+
+                if (!checkNodeStmt.get(data.node_id) && data.node_metadata) {
+                  insertNodeStmt.run(
+                    data.node_id,
+                    data.node_metadata.type,
+                    data.node_metadata.name,
+                    data.node_metadata.file_path,
+                    data.node_metadata.signature
+                  );
+                }
+
+                insertHistoryStmt.run(
+                  data.id,
+                  data.node_id,
+                  data.session_id,
+                  data.created_at,
+                  data.updated_at
+                );
+              } catch (err) {
+                // ignore
+              }
+            }
+          });
+          syncHistoryTx();
+        }
+      }
+
+      // 2. Sync Graph JSONs
+      const graphDir = path.join(workspaceRoot, 'graph');
+      if (fs.existsSync(graphDir)) {
+        // Recursively find all JSON files in graphDir
+        const walkSync = (dir: string, fileList: string[] = []): string[] => {
+          const files = fs.readdirSync(dir);
+          for (const file of files) {
+            const filePath = path.join(dir, file);
+            if (fs.statSync(filePath).isDirectory()) {
+              walkSync(filePath, fileList);
+            } else if (file.endsWith('.json')) {
+              fileList.push(filePath);
+            }
+          }
+          return fileList;
+        };
+
+        const jsonFiles = walkSync(graphDir);
+        if (jsonFiles.length > 0) {
+          const deleteNodesForFileStmt = this.db.prepare('DELETE FROM nodes WHERE file_path = ? OR file_path LIKE ?');
+          const deleteConnsForNodesStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ?');
+          const insertNodeStmt = this.db.prepare(`
+            INSERT OR REPLACE INTO nodes (id, type, name, file_path, signature, deprecated)
+            VALUES (?, ?, ?, ?, ?, 0)
+          `);
+          const insertConnStmt = this.db.prepare(`
+            INSERT OR IGNORE INTO node_connections (source_node_id, target_node_id)
+            VALUES (?, ?)
+          `);
+
+          // Transaction for fast batch syncing
+          const syncGraphTx = this.db.transaction(() => {
+            for (const file of jsonFiles) {
+              try {
+                const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+                if (!data.file_path) continue;
+
+                const fileRelPath = data.file_path; // E.g. "{harrir-web}/app/page.tsx" or relative path
+                const fileAbsPath = this.toAbsolutePath(fileRelPath);
+
+                // Strip leading {repo} or ../ and normalize separators for matching
+                const cleanRelPath = fileRelPath.replace(/^\{[^}]+\}\//, '').replace(/^(\.\.\/)+/, '').replace(/\\/g, '/');
+                const fileQueryPath = `%${cleanRelPath.replace(/\//g, path.sep)}`;
+
+                // Clean existing nodes in SQLite for this file
+                deleteNodesForFileStmt.run(fileAbsPath, fileQueryPath);
+
+                // Insert nodes
+                const nodes = data.nodes || [];
+                for (const n of nodes) {
+                  deleteConnsForNodesStmt.run(n.id);
+                  insertNodeStmt.run(n.id, n.type, n.name, fileAbsPath, n.signature || null);
+                }
+
+                // Insert connections
+                const connections = data.connections || [];
+                for (const c of connections) {
+                  insertConnStmt.run(c.source_node_id, c.target_node_id);
+                }
+              } catch (err) {
+                // ignore
+              }
+            }
+          });
+          syncGraphTx();
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ SQLite warning: Failed to sync from disk:', err);
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
+  }
+
+  writeGraphToDisk(filePath: string) {
+    try {
+      if (!filePath) return;
+      const workspaceRoot = path.dirname(this.dbPath);
+      // Clean/resolve the file path
+      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(workspaceRoot, filePath);
+      const relPath = path.relative(workspaceRoot, absPath).replace(/\\/g, '/');
+      const repoRelPath = this.toRepoRelativePath(absPath);
+
+      // E.g., "{harrir-web}/app/page.tsx" -> "graph/harrir-web/app/page.json"
+      const diskRelPath = repoRelPath.replace(/^\{([^}]+)\}/, '$1').replace(/\.[^/.]+$/, '.json');
+      const graphJsonPath = path.join(workspaceRoot, 'graph', diskRelPath);
+
+      // Get all active nodes in this file
+      const stmtNodes = this.db.prepare(`
+        SELECT * FROM nodes
+        WHERE deprecated = 0 AND (file_path = ? OR file_path LIKE ? OR file_path LIKE ? OR file_path LIKE ?)
+      `);
+      const nodes = stmtNodes.all(absPath, `%${relPath}%`, `%${absPath}%`, `%${relPath}`) as DbNode[];
+
+      if (nodes.length === 0) {
+        // If no nodes left, delete the JSON file if it exists
+        if (fs.existsSync(graphJsonPath)) {
+          fs.unlinkSync(graphJsonPath);
+        }
+        return;
+      }
+
+      // Collect all connections where source node is one of these nodes
+      const nodeIds = nodes.map(n => n.id);
+      const connections: DbConnection[] = [];
+      
+      if (nodeIds.length > 0) {
+        const stmtConn = this.db.prepare(`
+          SELECT * FROM node_connections
+          WHERE source_node_id = ?
+        `);
+        for (const id of nodeIds) {
+          const conns = stmtConn.all(id) as DbConnection[];
+          connections.push(...conns);
+        }
+      }
+
+      // Format data
+      const data = {
+        file_path: repoRelPath,
+        nodes: nodes.map(n => ({
+          id: n.id,
+          name: n.name,
+          type: n.type,
+          signature: n.signature
+        })),
+        connections: connections.map(c => ({
+          source_node_id: c.source_node_id,
+          target_node_id: c.target_node_id
+        }))
+      };
+
+      fs.mkdirSync(path.dirname(graphJsonPath), { recursive: true });
+      fs.writeFileSync(graphJsonPath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('⚠️ SQLite warning: Failed to write graph JSON to disk:', err);
+    }
   }
 }
