@@ -87,6 +87,9 @@ program
   .option('--model <name>', 'Model identifier (default: "gemini-2.0-flash", "gemini-1.5-flash", or "qwen2.5-coder")')
   .option('--key <api_key>', 'API Key or Service Account file path (overrides GEMINI_API_KEY / GOOGLE_APPLICATION_CREDENTIALS)')
   .option('--url <url>', 'Ollama server endpoint (default: "http://localhost:11434")')
+  .option('--chunk-size <lines>', 'Max lines per chunk sent to the LLM (default: 350). Increase for large-context models like gemini-2.5-flash', '350')
+  .option('--chunk-overlap <lines>', 'Overlap lines between chunks to avoid missing nodes at boundaries (default: 50)', '50')
+  .option('--local-edges', 'Resolve Phase 2 connections locally using typescript AST and regex instead of calling LLM')
   .action(async (opts: {
     path?: string;
     run?: boolean;
@@ -94,6 +97,9 @@ program
     model?: string;
     key?: string;
     url?: string;
+    chunkSize: string;
+    chunkOverlap: string;
+    localEdges?: boolean;
   }) => {
     const devmindPath = opts.path ?? '.devmind';
     const resolved = require('path').resolve(devmindPath);
@@ -105,7 +111,10 @@ program
           provider: opts.provider,
           model: opts.model,
           key: opts.key,
-          url: opts.url
+          url: opts.url,
+          chunkSize: parseInt(opts.chunkSize, 10) || 350,
+          chunkOverlap: parseInt(opts.chunkOverlap, 10) || 50,
+          localEdges: !!opts.localEdges
         });
       } catch (err) {
         console.error(`❌ Background indexing failed: ${(err as Error).message}`);
@@ -121,6 +130,7 @@ program
       console.log(`   "NEVER use or write external scripts (like Python) to index files."\n`);
       console.log(`   Or run it locally in the background using:\n`);
       console.log(`   devsmind index --run --provider gemini --key YOUR_GEMINI_KEY`);
+      console.log(`   devsmind index --run --provider gemini --model gemini-2.5-flash --key YOUR_GEMINI_KEY --chunk-size 1500 --chunk-overlap 100`);
       console.log(`   devsmind index --run --provider ollama --model qwen2.5-coder\n`);
     }
   });
@@ -133,12 +143,18 @@ program
   .option('--model <name>', 'Model identifier (default: "gemini-2.0-flash", "gemini-1.5-flash", or "qwen2.5-coder")')
   .option('--key <api_key>', 'API Key or Service Account file path (overrides GEMINI_API_KEY / GOOGLE_APPLICATION_CREDENTIALS)')
   .option('--url <url>', 'Ollama server endpoint (default: "http://localhost:11434")')
+  .option('--chunk-size <lines>', 'Max lines per chunk sent to the LLM (default: 350). Increase for large-context models like gemini-2.5-flash', '350')
+  .option('--chunk-overlap <lines>', 'Overlap lines between chunks to avoid missing nodes at boundaries (default: 50)', '50')
+  .option('--local-edges', 'Resolve Phase 2 connections locally using typescript AST and regex instead of calling LLM')
   .action(async (opts: {
     path?: string;
     provider: 'gemini' | 'vertex' | 'ollama';
     model?: string;
     key?: string;
     url?: string;
+    chunkSize: string;
+    chunkOverlap: string;
+    localEdges?: boolean;
   }) => {
     const devmindPath = opts.path ?? '.devmind';
     try {
@@ -147,7 +163,10 @@ program
         provider: opts.provider,
         model: opts.model,
         key: opts.key,
-        url: opts.url
+        url: opts.url,
+        chunkSize: parseInt(opts.chunkSize, 10) || 350,
+        chunkOverlap: parseInt(opts.chunkOverlap, 10) || 50,
+        localEdges: !!opts.localEdges
       });
     } catch (err) {
       console.error(`❌ Reindexing failed: ${(err as Error).message}`);

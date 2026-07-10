@@ -143,13 +143,18 @@ Run the indexer directly in your local terminal using a background LLM provider.
 
 **Example Command:**
 ```bash
-devsmind index --run --provider gemini --model gemini-2.5-flash --key YOUR_API_KEY
+devsmind index --run --provider gemini --model gemini-2.5-flash --key YOUR_API_KEY --chunk-size 1500 --local-edges
 ```
 
 **Supported Providers (`--provider`):**
 *   `gemini` (Default. Free tier rate-limits to stay within 15 RPM).
 *   `vertex` (Google Cloud Vertex AI).
 *   `ollama` (For local offline models, e.g. `--model qwen2.5-coder`).
+
+**Performance & Optimization Flags:**
+*   `--local-edges`: (Recommended) Offloads Phase 2 (Connection Resolution) from LLM APIs to your local machine. It uses the TypeScript/JavaScript compiler AST parser to trace module imports/references, and a regex fallback for other languages (Python, Go, Java, etc.). It resolves all connections **instantly, offline, and for free** with 100% precision.
+*   `--chunk-size <lines>`: Max lines per file chunk sent to the LLM (default: `350`). For large-context models like Gemini 2.5 Flash, you can scale this up (e.g. `--chunk-size 1500`) to process files in fewer chunks and drastically speed up Phase 1 indexing.
+*   `--chunk-overlap <lines>`: Number of overlapping lines between chunks (default: `50`) to ensure nodes spanning boundaries are not split and missed.
 
 #### Option B: In-Chat Agent Indexing
 Tell your AI assistant inside your IDE chat:
@@ -311,7 +316,11 @@ The new developer's AI agent now possesses the full architectural context and de
 
 ## Changelog
 
-### Version 2.0.4 (Current Release)
+### Version 2.0.5 (Current Release)
+*   **Local Connection Resolution (`--local-edges`)**: Added local compiler AST connection resolution for TypeScript and JavaScript files, and regex identifier mapping for other languages (Python, Go, Java, etc.). This offloads Phase 2 connection resolution entirely from LLM APIs to the local machine, making edge connection generation instant, offline, and free of API costs.
+*   **Configurable Indexer Chunk Size (`--chunk-size` and `--chunk-overlap`)**: Exposed chunk size and overlap controls as CLI flags. Users of large-context models (like Gemini 2.5 Flash) can scale chunk sizes to process files in a single pass, accelerating Phase 1 node extraction.
+
+### Version 2.0.4
 *   **Disk-Based History Adaptation & SQL Search Optimization**: 
     * Restored SQL-based text filtering (e.g. `getDeveloperActivity`, `getChangesByRequirement`, `searchDecisions`, and `searchNodes`) by storing the small `reasoning` text directly in the SQLite `history` table while maintaining the large `code_snapshot` exclusively on disk.
     * Fixed `getRecentChanges` and `getAllHistory` to populate reasoning/code from disk-based history files.

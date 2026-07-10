@@ -7,6 +7,7 @@ import { DevMindDatabase } from '../db/database';
 import { readScratchpad, createScratchpad, writeScratchpad } from '../db/indexer';
 import { scanRepoFiles } from '../utils/scanner';
 import { safeJsonParse } from '../utils/json';
+import { resolveConnectionsLocally } from '../utils/ast';
 
 interface ExtractedNode {
   node_id: string;
@@ -751,10 +752,12 @@ async function extractNodesFromCode(
   getVertexToken: () => Promise<string>,
   vertexProjectId: string,
   vertexLocation: string,
-  progress: ProgressDisplay
+  progress: ProgressDisplay,
+  chunkSize: number = 350,
+  chunkOverlap: number = 50
 ): Promise<ExtractionResult> {
-  const maxLines = 350;
-  const overlap = 50;
+  const maxLines = chunkSize;
+  const overlap = chunkOverlap;
   const lines = code.split('\n');
 
   const executeExtraction = async (codeChunk: string): Promise<ExtractionResult> => {
@@ -843,11 +846,20 @@ export async function runBackgroundIndexing(opts: {
   model?: string;
   key?: string;
   url?: string;
+  chunkSize?: number;
+  chunkOverlap?: number;
+  localEdges?: boolean;
 }) {
   const resolvedDevmind = path.resolve(opts.devmindPath);
+  const chunkSize = opts.chunkSize ?? 350;
+  const chunkOverlap = opts.chunkOverlap ?? 50;
+  const localEdges = !!opts.localEdges;
+
   console.log(`\n🧠 DevsMind Background Indexer`);
   console.log(`   Brain directory : ${resolvedDevmind}`);
   console.log(`   Provider        : ${opts.provider}`);
+  console.log(`   Local Edges     : ${localEdges}`);
+  console.log(`   Chunk size      : ${chunkSize} lines  (overlap: ${chunkOverlap} lines)`);
   
   let modelName = opts.model || '';
   let vertexSaData: any = null;
@@ -996,7 +1008,9 @@ export async function runBackgroundIndexing(opts: {
           getVertexToken,
           vertexProjectId,
           vertexLocation,
-          progress
+          progress,
+          chunkSize,
+          chunkOverlap
         );
       } catch (err) {
         progress.finishPhase(`Paused — API error. Run again to resume.`);
@@ -1121,41 +1135,46 @@ export async function runBackgroundIndexing(opts: {
       }
 
       let connections: string[] = [];
-      let retries = 5;
-      let backoffMs = 10000;
-      while (retries > 0) {
-        try {
-          if (opts.provider === 'gemini') {
-            connections = await resolveConnectionsWithGemini(
-              modelName, opts.key!, node.id, latestCode.code_snapshot, filteredCandidates
-            );
-          } else if (opts.provider === 'vertex') {
-            const token = await getVertexToken();
-            connections = await resolveConnectionsWithVertex(
-              modelName, token, vertexProjectId, vertexLocation, node.id, latestCode.code_snapshot, filteredCandidates
-            );
-          } else {
-            connections = await resolveConnectionsWithOllama(
-              opts.url!, modelName, node.id, latestCode.code_snapshot, filteredCandidates
-            );
-          }
-          break;
-        } catch (err) {
-          retries--;
-          if (retries === 0) {
-            progress.finishPhase('Paused — API error. Run again to resume.');
-            console.error(`❌ ${(err as Error).message}`);
-            db.close();
-            process.exit(1);
-          }
-          const errMsg = (err as Error).message;
-          if (errMsg.includes('429')) {
-            progress.updateStatus(`Rate limited (429). Retrying in ${backoffMs / 1000}s...`);
-            await sleep(backoffMs);
-            backoffMs *= 2;
-          } else {
-            progress.updateStatus(`API error. Retrying in 2s...`);
-            await sleep(2000);
+      if (localEdges) {
+        progress.updateStatus(`Resolving connections locally via AST…`);
+        connections = resolveConnectionsLocally(node.id, node.file_path, activeNodes, resolvedDevmind);
+      } else {
+        let retries = 5;
+        let backoffMs = 10000;
+        while (retries > 0) {
+          try {
+            if (opts.provider === 'gemini') {
+              connections = await resolveConnectionsWithGemini(
+                modelName, opts.key!, node.id, latestCode.code_snapshot, filteredCandidates
+              );
+            } else if (opts.provider === 'vertex') {
+              const token = await getVertexToken();
+              connections = await resolveConnectionsWithVertex(
+                modelName, token, vertexProjectId, vertexLocation, node.id, latestCode.code_snapshot, filteredCandidates
+              );
+            } else {
+              connections = await resolveConnectionsWithOllama(
+                opts.url!, modelName, node.id, latestCode.code_snapshot, filteredCandidates
+              );
+            }
+            break;
+          } catch (err) {
+            retries--;
+            if (retries === 0) {
+              progress.finishPhase('Paused — API error. Run again to resume.');
+              console.error(`❌ ${(err as Error).message}`);
+              db.close();
+              process.exit(1);
+            }
+            const errMsg = (err as Error).message;
+            if (errMsg.includes('429')) {
+              progress.updateStatus(`Rate limited (429). Retrying in ${backoffMs / 1000}s...`);
+              await sleep(backoffMs);
+              backoffMs *= 2;
+            } else {
+              progress.updateStatus(`API error. Retrying in 2s...`);
+              await sleep(2000);
+            }
           }
         }
       }
@@ -1176,8 +1195,10 @@ export async function runBackgroundIndexing(opts: {
 
       progress.completeItem(`${pad.connections_created} connection(s) created so far`);
 
-      if (opts.provider === 'gemini' || opts.provider === 'vertex') await sleep(2000);
-      else await sleep(200);
+      if (!localEdges) {
+        if (opts.provider === 'gemini' || opts.provider === 'vertex') await sleep(2000);
+        else await sleep(200);
+      }
     }
 
     progress.finishPhase(`Phase 2 done — ${pad.connections_created} connection(s) linked across ${pad.nodes_total} node(s)`);
@@ -1204,11 +1225,20 @@ export async function runBackgroundReindexing(opts: {
   model?: string;
   key?: string;
   url?: string;
+  chunkSize?: number;
+  chunkOverlap?: number;
+  localEdges?: boolean;
 }) {
   const resolvedDevmind = path.resolve(opts.devmindPath);
+  const chunkSize = opts.chunkSize ?? 350;
+  const chunkOverlap = opts.chunkOverlap ?? 50;
+  const localEdges = !!opts.localEdges;
+
   console.log(`\n🧠 DevsMind Background Reindexer`);
   console.log(`   Brain directory : ${resolvedDevmind}`);
   console.log(`   Provider        : ${opts.provider}`);
+  console.log(`   Local Edges     : ${localEdges}`);
+  console.log(`   Chunk size      : ${chunkSize} lines  (overlap: ${chunkOverlap} lines)`);
   
   let modelName = opts.model || '';
   let vertexSaData: any = null;
@@ -1368,7 +1398,9 @@ export async function runBackgroundReindexing(opts: {
         getVertexToken,
         vertexProjectId,
         vertexLocation,
-        progress
+        progress,
+        chunkSize,
+        chunkOverlap
       );
     } catch (err) {
       progress.finishPhase(`Paused — API error.`);
@@ -1457,41 +1489,49 @@ export async function runBackgroundReindexing(opts: {
       }
 
       let connections: string[] = [];
-      let retries = 5;
-      let backoffMs = 10000;
-      while (retries > 0) {
-        try {
-          if (opts.provider === 'gemini') {
-            connections = await resolveConnectionsWithGemini(
-              modelName, opts.key!, nodeId, latestCode.code_snapshot, filteredCandidates
-            );
-          } else if (opts.provider === 'vertex') {
-            const token = await getVertexToken();
-            connections = await resolveConnectionsWithVertex(
-              modelName, token, vertexProjectId, vertexLocation, nodeId, latestCode.code_snapshot, filteredCandidates
-            );
-          } else {
-            connections = await resolveConnectionsWithOllama(
-              opts.url!, modelName, nodeId, latestCode.code_snapshot, filteredCandidates
-            );
-          }
-          break;
-        } catch (err) {
-          retries--;
-          if (retries === 0) {
-            progress.finishPhase('Paused — API error.');
-            console.error(`❌ ${(err as Error).message}`);
-            db.close();
-            process.exit(1);
-          }
-          const errMsg = (err as Error).message;
-          if (errMsg.includes('429')) {
-            progress.updateStatus(`Rate limited (429). Retrying in ${backoffMs / 1000}s...`);
-            await sleep(backoffMs);
-            backoffMs *= 2;
-          } else {
-            progress.updateStatus(`API error. Retrying in 2s...`);
-            await sleep(2000);
+      if (localEdges) {
+        progress.updateStatus(`Resolving connections locally via AST…`);
+        const nodeObj = db.getNode(nodeId);
+        if (nodeObj && nodeObj.file_path) {
+          connections = resolveConnectionsLocally(nodeId, nodeObj.file_path, activeNodes, resolvedDevmind);
+        }
+      } else {
+        let retries = 5;
+        let backoffMs = 10000;
+        while (retries > 0) {
+          try {
+            if (opts.provider === 'gemini') {
+              connections = await resolveConnectionsWithGemini(
+                modelName, opts.key!, nodeId, latestCode.code_snapshot, filteredCandidates
+              );
+            } else if (opts.provider === 'vertex') {
+              const token = await getVertexToken();
+              connections = await resolveConnectionsWithVertex(
+                modelName, token, vertexProjectId, vertexLocation, nodeId, latestCode.code_snapshot, filteredCandidates
+              );
+            } else {
+              connections = await resolveConnectionsWithOllama(
+                opts.url!, modelName, nodeId, latestCode.code_snapshot, filteredCandidates
+              );
+            }
+            break;
+          } catch (err) {
+            retries--;
+            if (retries === 0) {
+              progress.finishPhase('Paused — API error.');
+              console.error(`❌ ${(err as Error).message}`);
+              db.close();
+              process.exit(1);
+            }
+            const errMsg = (err as Error).message;
+            if (errMsg.includes('429')) {
+              progress.updateStatus(`Rate limited (429). Retrying in ${backoffMs / 1000}s...`);
+              await sleep(backoffMs);
+              backoffMs *= 2;
+            } else {
+              progress.updateStatus(`API error. Retrying in 2s...`);
+              await sleep(2000);
+            }
           }
         }
       }
@@ -1507,8 +1547,10 @@ export async function runBackgroundReindexing(opts: {
 
       progress.completeItem(`${connectionsAdded} connection(s) created`);
 
-      if (opts.provider === 'gemini' || opts.provider === 'vertex') await sleep(2000);
-      else await sleep(200);
+      if (!localEdges) {
+        if (opts.provider === 'gemini' || opts.provider === 'vertex') await sleep(2000);
+        else await sleep(200);
+      }
     }
 
     progress.finishPhase('Phase 2 done — finished reindexing connections');
