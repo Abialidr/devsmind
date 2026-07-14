@@ -809,7 +809,8 @@ async function handleNewInit(cwd: string) {
     'brain.db',
     'brain.db-wal',
     'brain.db-shm',
-    'index_scratchpad.json'
+    'index_scratchpad.json',
+    'history_scratchpad.json'
   ].join('\n') + '\n';
   fs.writeFileSync(gitignorePath, ignoreContent, 'utf-8');
   console.log(`💾 Created/Updated ${gitignorePath}`);

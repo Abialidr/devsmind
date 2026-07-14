@@ -94,6 +94,7 @@ program
   .option('--nodes-only', 'Only run Phase 1 (node/code extraction). No connections are built or touched.')
   .option('--edges-only', 'Only run Phase 2 (connection resolution). Wipes existing connections and rebuilds them fresh across all current nodes. Requires nodes to already exist.')
   .option('--repos <names>', 'Comma-separated repo names to restrict this run to (standalone mode only). Composes with --nodes-only / --edges-only, or full. Not allowed with --from-scratch.')
+  .option('--rpm <number>', 'Max LLM requests per minute, paced proactively to avoid 429s (default: unthrottled — fires as fast as possible)')
   .option('--yes', 'Skip the confirmation prompt for --from-scratch')
   .action(async (opts: {
     path?: string;
@@ -109,6 +110,7 @@ program
     nodesOnly?: boolean;
     edgesOnly?: boolean;
     repos?: string;
+    rpm?: string;
     yes?: boolean;
   }) => {
     const devmindPath = opts.path ?? '.devmind';
@@ -137,6 +139,7 @@ program
           nodesOnly: !!opts.nodesOnly,
           edgesOnly: !!opts.edgesOnly,
           repos: opts.repos ? opts.repos.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+          rpm: opts.rpm ? parseInt(opts.rpm, 10) : undefined,
           yes: !!opts.yes
         });
       } catch (err) {
@@ -148,7 +151,7 @@ program
       console.log(`   Brain : ${resolved}`);
       console.log(`\n📋 To index your codebase, tell your AI assistant:\n`);
       console.log(`   "Call devsmind.index_start with devmind_path = ${resolved}"`);
-      console.log(`   "Then read every file it returns and call add_node + add_connection for each entity."`);
+      console.log(`   "Then read every file it returns and call stage_change for each entity, then commit_changes."`);
       console.log(`   "Checkpoint every 10 files. Call index_complete when done."`);
       console.log(`   "NEVER use or write external scripts (like Python) to index files."\n`);
       console.log(`   Or run it locally in the background using:\n`);
@@ -174,6 +177,8 @@ program
   .option('--chunk-size <lines>', 'Max lines per chunk sent to the LLM (default: off — whole file in one call). Set this for very large files or smaller-context models.')
   .option('--chunk-overlap <lines>', 'Overlap lines between chunks, only used when --chunk-size is set (default: 50)')
   .option('--local-edges', '[Deprecated] Connections are always resolved locally via AST now — this flag is a no-op, kept for backward compatibility.')
+  .option('--rpm <number>', 'Max LLM requests per minute, paced proactively to avoid 429s (default: unthrottled — fires as fast as possible)')
+  .option('--fill-gaps', 'Instead of the normal mtime-based diff, back-fill only files that currently have zero graph nodes (never indexed, or dropped by a prior crashed run). Per-file failures are skipped (not fatal) and edges are rebuilt across the whole graph afterward. Safe to re-run repeatedly until no gaps remain.')
   .action(async (opts: {
     path?: string;
     provider: 'gemini' | 'vertex' | 'ollama';
@@ -183,6 +188,8 @@ program
     chunkSize?: string;
     chunkOverlap?: string;
     localEdges?: boolean;
+    rpm?: string;
+    fillGaps?: boolean;
   }) => {
     const devmindPath = opts.path ?? '.devmind';
     try {
@@ -194,7 +201,9 @@ program
         url: opts.url,
         chunkSize: opts.chunkSize ? parseInt(opts.chunkSize, 10) : undefined,
         chunkOverlap: opts.chunkOverlap ? parseInt(opts.chunkOverlap, 10) : undefined,
-        localEdges: !!opts.localEdges
+        localEdges: !!opts.localEdges,
+        rpm: opts.rpm ? parseInt(opts.rpm, 10) : undefined,
+        fillGaps: !!opts.fillGaps
       });
     } catch (err) {
       console.error(`❌ Reindexing failed: ${(err as Error).message}`);

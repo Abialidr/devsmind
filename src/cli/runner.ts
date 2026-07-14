@@ -9,7 +9,8 @@ import { readScratchpad, createScratchpad, writeScratchpad } from '../db/indexer
 import { scanRepoFiles } from '../utils/scanner';
 import { loadProjectContext } from '../utils/config';
 import { safeJsonParse } from '../utils/json';
-import { resolveConnectionsLocally } from '../utils/ast';
+import { resolveConnectionsLocally, extractNodeFromFile, MissingRef } from '../utils/ast';
+import { MissingAgg, finalizeMissingNodes } from '../db/edges';
 
 interface ExtractedNode {
   node_id: string;
@@ -72,6 +73,21 @@ function makeHttpRequest(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── LLM request pacing ───────────────────────────────────────────────────
+// Off by default — requests fire as fast as possible and 429s are handled by
+// the retry/backoff in extractNodesFromCode. Pass --rpm to proactively space
+// out requests and stay under a known quota instead of reacting after the fact.
+let lastLlmCallAt = 0;
+async function throttleRpm(rpm?: number): Promise<void> {
+  if (!rpm || rpm <= 0) return;
+  const minIntervalMs = 60000 / rpm;
+  const wait = lastLlmCallAt + minIntervalMs - Date.now();
+  if (wait > 0) {
+    await sleep(wait);
+  }
+  lastLlmCallAt = Date.now();
 }
 
 // ── Progress Display ─────────────────────────────────────────────────────
@@ -564,7 +580,8 @@ async function extractNodesFromCode(
   vertexLocation: string,
   progress: ProgressDisplay,
   chunkSize?: number,
-  chunkOverlap?: number
+  chunkOverlap?: number,
+  rpm?: number
 ): Promise<ExtractionResult> {
   // Chunking is opt-in: with no --chunk-size, the whole file always goes in one call.
   const maxLines = chunkSize;
@@ -576,6 +593,7 @@ async function extractNodesFromCode(
     let backoffMs = 10000;
     while (retries > 0) {
       try {
+        await throttleRpm(rpm);
         if (provider === 'gemini') {
           return await extractWithGemini(modelName, key!, filePath, codeChunk);
         } else if (provider === 'vertex') {
@@ -668,6 +686,7 @@ export async function runBackgroundIndexing(opts: {
   edgesOnly?: boolean;
   repos?: string[];
   yes?: boolean;
+  rpm?: number;
 }) {
   const resolvedDevmind = path.resolve(opts.devmindPath);
   const chunkSize = opts.chunkSize;
@@ -675,6 +694,7 @@ export async function runBackgroundIndexing(opts: {
   const fromScratch = !!opts.fromScratch;
   const nodesOnly = !!opts.nodesOnly;
   const edgesOnly = !!opts.edgesOnly;
+  const rpm = opts.rpm;
 
   // Repo scoping: restrict the whole operation to the named repos. Standalone-only.
   const scopedRepos: string[] | null = opts.repos && opts.repos.length ? opts.repos : null;
@@ -710,11 +730,23 @@ export async function runBackgroundIndexing(opts: {
   // "complete" and skip every un-indexed repo.
   const padFile: string | undefined = scopedRepos ? 'index_scratchpad.scoped.json' : undefined;
 
+  // Missing-node detection: resolveConnectionsLocally reports references that resolve to a
+  // real repo file with no node (a Phase-1 extraction gap). Deduped by (file, symbol); these
+  // are auto-created from the AST and reported at the end of every edge-resolution run.
+  const missingRefs = new Map<string, MissingAgg>();
+  const onMissing = (rec: MissingRef) => {
+    const key = rec.targetFile + ' ' + rec.name;
+    let e = missingRefs.get(key);
+    if (!e) { e = { file: rec.targetFile, symbol: rec.name, referenced_by: new Set() }; missingRefs.set(key, e); }
+    e.referenced_by.add(rec.sourceNodeId);
+  };
+
   console.log(`\n🧠 DevsMind Background Indexer`);
   console.log(`   Brain directory : ${resolvedDevmind}`);
   console.log(`   Provider        : ${opts.provider}`);
   console.log(`   Connections     : local AST resolution (always)`);
   console.log(`   Chunking        : ${chunkSize ? `${chunkSize} lines (overlap: ${chunkOverlap ?? 50})` : 'off — whole file per call'}`);
+  console.log(`   Rate limit      : ${rpm ? `${rpm} req/min` : 'unthrottled'}`);
 
   let modelName = opts.model || '';
   let vertexSaData: any = null;
@@ -866,7 +898,7 @@ export async function runBackgroundIndexing(opts: {
       }
 
       edgeProgress.updateStatus(`Resolving connections locally via AST…`);
-      const connections = resolveConnectionsLocally(node.id, node.file_path, allNodes, resolvedDevmind);
+      const connections = resolveConnectionsLocally(node.id, node.file_path, allNodes, resolvedDevmind, onMissing);
 
       let addedCount = 0;
       for (const targetId of connections) {
@@ -884,6 +916,8 @@ export async function runBackgroundIndexing(opts: {
     }
 
     edgeProgress.finishPhase(`Phase 2 done — ${edgePad.connections_created} connection(s) linked across ${existingNodes.length} node(s)`);
+
+    finalizeMissingNodes(resolvedDevmind, db, missingRefs);
 
     edgePad.status = 'complete';
     edgePad.updated_at = new Date().toISOString();
@@ -985,7 +1019,8 @@ export async function runBackgroundIndexing(opts: {
           vertexLocation,
           progress,
           chunkSize,
-          chunkOverlap
+          chunkOverlap,
+          rpm
         );
       } catch (err) {
         progress.finishPhase(`Paused — API error. Run again to resume.`);
@@ -1113,7 +1148,7 @@ export async function runBackgroundIndexing(opts: {
       }
 
       progress.updateStatus(`Resolving connections locally via AST…`);
-      const connections = resolveConnectionsLocally(node.id, node.file_path, allNodes, resolvedDevmind);
+      const connections = resolveConnectionsLocally(node.id, node.file_path, allNodes, resolvedDevmind, onMissing);
 
       let addedCount = 0;
       for (const targetId of connections) {
@@ -1133,6 +1168,8 @@ export async function runBackgroundIndexing(opts: {
     }
 
     progress.finishPhase(`Phase 2 done — ${pad.connections_created} connection(s) linked across ${pad.nodes_total} node(s)`);
+
+    finalizeMissingNodes(resolvedDevmind, db, missingRefs);
   }
 
   // Mark indexing session as fully complete
@@ -1160,16 +1197,29 @@ export async function runBackgroundReindexing(opts: {
   chunkOverlap?: number;
   /** @deprecated Connections are always resolved locally via AST now. Accepted as a no-op for backward compatibility. */
   localEdges?: boolean;
+  rpm?: number;
+  /**
+   * Instead of the normal mtime-vs-last_reindex_at diff, select files that currently
+   * have zero active nodes in the DB (never indexed, or dropped by a prior crashed
+   * run) and backfill just those. Per-file extraction failures are logged and skipped
+   * rather than aborting the whole run, and edges are rebuilt across the WHOLE graph
+   * afterward (cheap — local AST resolution, no LLM calls) so new inbound connections
+   * from already-indexed files are captured too. Safe to re-run repeatedly.
+   */
+  fillGaps?: boolean;
 }) {
   const resolvedDevmind = path.resolve(opts.devmindPath);
   const chunkSize = opts.chunkSize;
   const chunkOverlap = opts.chunkOverlap;
+  const rpm = opts.rpm;
+  const fillGaps = !!opts.fillGaps;
 
   console.log(`\n🧠 DevsMind Background Reindexer`);
   console.log(`   Brain directory : ${resolvedDevmind}`);
   console.log(`   Provider        : ${opts.provider}`);
   console.log(`   Connections     : local AST resolution (always)`);
   console.log(`   Chunking        : ${chunkSize ? `${chunkSize} lines (overlap: ${chunkOverlap ?? 50})` : 'off — whole file per call'}`);
+  console.log(`   Rate limit      : ${rpm ? `${rpm} req/min` : 'unthrottled'}`);
 
   let modelName = opts.model || '';
   let vertexSaData: any = null;
@@ -1254,38 +1304,57 @@ export async function runBackgroundReindexing(opts: {
     return;
   }
 
-  // 4. Retrieve last reindexing timestamp
-  const lastReindexVal = db.getSystemMeta('last_reindex_at');
-  const lastReindexTime = lastReindexVal ? new Date(lastReindexVal).getTime() : 0;
-  console.log(`   Last reindex    : ${lastReindexVal ? new Date(lastReindexVal).toLocaleString() : 'Never'}`);
-
-  // 5. Detect modified or newly added files
+  // 4 & 5. Select files to process.
   const modifiedFiles: { repoName: string; absolutePath: string }[] = [];
-  for (const repo of repos) {
-    for (const f of repo.files) {
-      try {
-        const stat = fs.statSync(f);
-        if (stat.mtimeMs > lastReindexTime) {
+
+  if (fillGaps) {
+    console.log('   Mode            : gap-fill (files with zero graph nodes)');
+    for (const repo of repos) {
+      for (const f of repo.files) {
+        if (db.getNodesByFilePath(f).length === 0) {
           modifiedFiles.push({ repoName: repo.repo_name, absolutePath: f });
         }
-      } catch (err) {
-        // ignore errors
       }
     }
-  }
 
-  if (modifiedFiles.length === 0) {
-    console.log('\n✅ Code graph is already up to date. No modified files detected.');
-    db.setSystemMeta('last_reindex_at', new Date().toISOString());
-    db.close();
-    return;
-  }
+    if (modifiedFiles.length === 0) {
+      console.log('\n✅ No gaps found — every indexable file already has at least one graph node.');
+      db.close();
+      return;
+    }
 
-  console.log(`\n📝 Detected ${modifiedFiles.length} modified/new file(s) since last reindex.`);
+    console.log(`\n📝 Found ${modifiedFiles.length} file(s) with zero nodes (never indexed, or dropped by a prior failed run).`);
+  } else {
+    const lastReindexVal = db.getSystemMeta('last_reindex_at');
+    const lastReindexTime = lastReindexVal ? new Date(lastReindexVal).getTime() : 0;
+    console.log(`   Last reindex    : ${lastReindexVal ? new Date(lastReindexVal).toLocaleString() : 'Never'}`);
+
+    for (const repo of repos) {
+      for (const f of repo.files) {
+        try {
+          const stat = fs.statSync(f);
+          if (stat.mtimeMs > lastReindexTime) {
+            modifiedFiles.push({ repoName: repo.repo_name, absolutePath: f });
+          }
+        } catch (err) {
+          // ignore errors
+        }
+      }
+    }
+
+    if (modifiedFiles.length === 0) {
+      console.log('\n✅ Code graph is already up to date. No modified files detected.');
+      db.setSystemMeta('last_reindex_at', new Date().toISOString());
+      db.close();
+      return;
+    }
+
+    console.log(`\n📝 Detected ${modifiedFiles.length} modified/new file(s) since last reindex.`);
+  }
 
   // 6. Extraction & Upserting of modified nodes
   const progress = new ProgressDisplay();
-  progress.startPhase(1, 'Incremental Node Extraction', modifiedFiles.length, 0);
+  progress.startPhase(1, fillGaps ? 'Gap-Fill Node Extraction' : 'Incremental Node Extraction', modifiedFiles.length, 0);
 
   const newOrUpdatedNodeIds: string[] = [];
   // Source nodes (in possibly-unmodified files) that had edges pointing INTO the modified
@@ -1293,6 +1362,10 @@ export async function runBackgroundReindexing(opts: {
   // and re-resolve them after Phase 2 to rebuild the "used-by" edges (else every reindex
   // silently strips incoming edges from unmodified callers).
   const inboundSourceIds = new Set<string>();
+  // Gap-fill mode only: files that failed extraction after retries. Logged and skipped
+  // instead of aborting the whole run, so a persistently-failing file never blocks the
+  // rest of the gaps — the run is safe to repeat until this list is empty.
+  const stillFailedFiles: string[] = [];
 
   for (let fileIndex = 0; fileIndex < modifiedFiles.length; fileIndex++) {
     const fileObj = modifiedFiles[fileIndex];
@@ -1338,9 +1411,15 @@ export async function runBackgroundReindexing(opts: {
         vertexLocation,
         progress,
         chunkSize,
-        chunkOverlap
+        chunkOverlap,
+        rpm
       );
     } catch (err) {
+      if (fillGaps) {
+        stillFailedFiles.push(relPath);
+        progress.skipItem(`extraction failed: ${(err as Error).message}`);
+        continue;
+      }
       progress.finishPhase(`Paused — API error.`);
       console.error(`❌ ${(err as Error).message}`);
       db.close();
@@ -1401,11 +1480,60 @@ export async function runBackgroundReindexing(opts: {
 
   progress.finishPhase(`Phase 1 done — parsed ${modifiedFiles.length} file(s), found ${newOrUpdatedNodeIds.length} new/updated node(s)`);
 
+  if (fillGaps) {
+    // Full graph-wide edge rebuild instead of the incremental Phase 2/2b: a newly-added
+    // node can be the TARGET of edges from files that were already indexed (the resolver
+    // couldn't create those edges earlier because the target didn't exist yet), so only
+    // re-resolving the new nodes' own outbound edges isn't enough. This is local AST
+    // resolution (no LLM calls), so rebuilding it across the whole graph is cheap and
+    // safe to repeat.
+    const activeNodes = db.listNodes();
+    const allNodeIds = new Set(activeNodes.map(n => n.id));
+
+    console.log('\n🧹 Clearing existing connections for a full rebuild...');
+    db.clearAllConnections();
+
+    progress.startPhase(2, 'Full Graph Edge Rebuild', activeNodes.length, 0);
+    let totalConnections = 0;
+    for (const node of activeNodes) {
+      progress.beginItem(node.id);
+      if (!node.file_path) { progress.skipItem('no file_path'); continue; }
+
+      progress.updateStatus(`Resolving connections locally via AST…`);
+      const connections = resolveConnectionsLocally(node.id, node.file_path, activeNodes, resolvedDevmind);
+
+      let added = 0;
+      for (const targetId of connections) {
+        if (allNodeIds.has(targetId)) {
+          db.addConnection(node.id, targetId);
+          added++;
+        }
+      }
+      totalConnections += added;
+      progress.completeItem(`${added} connection(s)`);
+    }
+    progress.finishPhase(`Phase 2 done — ${totalConnections} connection(s) rebuilt across ${activeNodes.length} node(s)`);
+
+    db.vacuum();
+    db.close();
+
+    console.log('\n\x1B[1m\x1B[32m  ✔ Gap-fill complete!\x1B[0m');
+    console.log(`  └─ Files backfilled : ${modifiedFiles.length - stillFailedFiles.length}/${modifiedFiles.length}`);
+    console.log(`  └─ Nodes added      : ${newOrUpdatedNodeIds.length}`);
+    console.log(`  └─ Connections      : ${totalConnections}`);
+    if (stillFailedFiles.length > 0) {
+      console.log(`\n\x1B[33m⚠️  ${stillFailedFiles.length} file(s) still failed extraction — re-run --fill-gaps to retry them:\x1B[0m`);
+      for (const f of stillFailedFiles) console.log(`     - ${f}`);
+    }
+    console.log('');
+    return;
+  }
+
   // Phase 2: Resolving connections for modified nodes
   if (newOrUpdatedNodeIds.length > 0) {
     const activeNodes = db.listNodes();
     const allNodeIds = activeNodes.map(n => n.id);
-    
+
     progress.startPhase(2, 'Incremental Connection Resolution', newOrUpdatedNodeIds.length, 0);
 
     for (let nodeIndex = 0; nodeIndex < newOrUpdatedNodeIds.length; nodeIndex++) {

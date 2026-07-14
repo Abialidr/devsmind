@@ -18,6 +18,13 @@ interface ImportInfo {
   isNamespace?: boolean; // `import * as X from '...'`
 }
 
+/** A used reference that resolves to a real repo file but has no node — a Phase-1 gap. */
+export interface MissingRef {
+  sourceNodeId: string;
+  name: string;
+  targetFile: string;
+}
+
 /**
  * Parses a DevsMind node ID into constituent parts
  */
@@ -169,6 +176,102 @@ function collectReferencedNames(root: ts.Node): Set<string> {
 
   ts.forEachChild(root, visit);
   return names;
+}
+
+/** Nodes that introduce their own variable scope (for free-variable analysis). */
+function isFunctionLikeScope(node: ts.Node): boolean {
+  return (
+    ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) || ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) || ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node)
+  );
+}
+
+/**
+ * Names bound directly in `scopeNode`'s own scope: its parameters plus every
+ * declaration anywhere in its body EXCEPT those inside nested function scopes (which
+ * own their bindings). Collected up front so forward references (a function that calls
+ * a sibling declared later) resolve as bound, not free.
+ */
+function collectScopeBindings(scopeNode: ts.Node): Set<string> {
+  const bound = new Set<string>();
+  const add = (name: ts.Node | undefined) => {
+    if (name && ts.isIdentifier(name)) bound.add(name.text);
+  };
+  function collect(n: ts.Node) {
+    if (ts.isVariableDeclaration(n) || ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) add(n.name);
+    else if (ts.isParameter(n) && ts.isIdentifier(n.name)) add(n.name);
+    else if (ts.isBindingElement(n) && ts.isIdentifier(n.name)) add(n.name);
+    else if (ts.isCatchClause(n) && n.variableDeclaration) add(n.variableDeclaration.name);
+    // Do not descend into nested function scopes — their params/locals belong to them.
+    if (n !== scopeNode && isFunctionLikeScope(n)) return;
+    ts.forEachChild(n, collect);
+  }
+  ts.forEachChild(scopeNode, collect);
+  return bound;
+}
+
+/**
+ * Scope-aware free-variable analysis. Returns the names a node USES that are NOT declared
+ * within its own scope (its genuine external dependencies) — plus the set of `this.<member>`
+ * accesses. Locally-declared names, parameters, and nested-closure bindings are excluded,
+ * which removes the name-collision noise that the flat collectReferencedNames produced (a
+ * local `const total` no longer matches an unrelated node named `total`). Property-access
+ * member names and JSX tags are kept (used for member/namespace matching downstream).
+ */
+function collectFreeReferences(root: ts.Node): { free: Set<string>; thisMembers: Set<string> } {
+  const free = new Set<string>();
+  const thisMembers = new Set<string>();
+
+  function walk(node: ts.Node, stack: Set<string>[]) {
+    const scope = isFunctionLikeScope(node) ? [...stack, collectScopeBindings(node)] : stack;
+
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ThisKeyword &&
+      ts.isIdentifier(node.name)
+    ) {
+      thisMembers.add(node.name.text);
+    }
+
+    if (ts.isIdentifier(node)) {
+      const parent = node.parent as ts.Node | undefined;
+      if (isDefinitionName(node)) {
+        // definition position — not a reference
+      } else if (parent && ts.isPropertyAccessExpression(parent) && parent.name === node) {
+        free.add(node.text); // member name of `a.b` — kept for member/namespace matching
+      } else if (parent && ts.isQualifiedName(parent) && parent.right === node) {
+        free.add(node.text); // qualified type name RHS
+      } else {
+        // genuine value/type reference — free iff not bound in any enclosing scope
+        if (!scope.some(s => s.has(node.text))) free.add(node.text);
+      }
+    }
+
+    ts.forEachChild(node, child => walk(child, scope));
+  }
+
+  walk(root, []);
+  return { free, thisMembers };
+}
+
+/** Best-effort structural node type from an AST declaration (no framework subtype). */
+function astBaseType(node: ts.Node): string {
+  if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return 'function';
+  if (ts.isMethodDeclaration(node) || ts.isMethodSignature(node)) return 'method';
+  if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return 'class';
+  if (ts.isInterfaceDeclaration(node)) return 'interface';
+  if (ts.isTypeAliasDeclaration(node)) return 'type_alias';
+  if (ts.isEnumDeclaration(node)) return 'enum';
+  if (ts.isVariableDeclaration(node)) {
+    const init = node.initializer;
+    if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init))) return 'function';
+    if (init && ts.isClassExpression(init)) return 'class';
+    return 'variable';
+  }
+  if (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) return 'variable';
+  return 'variable';
 }
 
 /**
@@ -527,6 +630,31 @@ function resolveImportToPaths(
   return out;
 }
 
+// Resolve a set of extension-less base paths to the first actual source file on disk
+// (tries .ts/.tsx/.js/.jsx and /index.*). Returns null for bare/node_modules specifiers
+// that don't map to a repo file. Cached — file existence is stable within an indexing run.
+const existingFileCache = new Map<string, string | null>();
+function resolveToExistingFile(basePaths: string[]): string | null {
+  const key = basePaths.join('|');
+  const cached = existingFileCache.get(key);
+  if (cached !== undefined) return cached;
+  let result: string | null = null;
+  outer: for (const base of basePaths) {
+    if (!base) continue;
+    for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
+      if (fs.existsSync(base + ext)) { result = base + ext; break outer; }
+    }
+    for (const idx of ['/index.ts', '/index.tsx', '/index.js', '/index.jsx']) {
+      if (fs.existsSync(base + idx)) { result = base + idx; break outer; }
+    }
+    try {
+      if (fs.existsSync(base) && fs.statSync(base).isFile()) { result = base; break outer; }
+    } catch { /* ignore */ }
+  }
+  existingFileCache.set(key, result);
+  return result;
+}
+
 /** Parse (and cache) an index/barrel file's re-export declarations. */
 function getBarrelReexports(resolvedImportPath: string): BarrelReexport[] {
   const indexCandidates = [
@@ -634,7 +762,8 @@ export function resolveConnectionsLocally(
   sourceNodeId: string,
   sourceFilePath: string,
   candidateNodes: { id: string; name: string; type: string; file_path: string }[],
-  devmindPath: string
+  devmindPath: string,
+  onMissing?: (rec: MissingRef) => void
 ): string[] {
   const parsedSource = parseNodeId(sourceNodeId);
   if (!parsedSource) return [];
@@ -661,6 +790,7 @@ export function resolveConnectionsLocally(
   const tsPaths = loadTsPaths(repoRoot);
 
   let referencedNames = new Set<string>();
+  let thisMembers = new Set<string>();
   let imports: ImportInfo[] = [];
   // True when we could NOT isolate this symbol's own AST subtree and fell back to
   // scanning the whole file. In that mode every identifier in the file is in scope,
@@ -673,10 +803,14 @@ export function resolveConnectionsLocally(
       const sourceFile = getSourceFile(sourceFilePath);
       imports = getFileImports(sourceFile);
 
-      // Locate the AST node for this class/method/function
+      // Locate the AST node for this class/method/function, then collect its FREE
+      // variables (names used but not declared in its own scope). Scope-awareness means
+      // locals/params are excluded, so they can no longer collide with unrelated nodes.
       const astNode = findNodeInAst(sourceFile, parsedSource.className, parsedSource.symbolName);
       if (astNode) {
-        referencedNames = collectReferencedNames(astNode);
+        const fr = collectFreeReferences(astNode);
+        referencedNames = fr.free;
+        thisMembers = fr.thisMembers;
       } else {
         // Fallback: scan the whole file, but mark isolation as failed so downstream
         // matching stays conservative (cross-file, import-gated links only).
@@ -695,15 +829,6 @@ export function resolveConnectionsLocally(
   }
 
   const sourceDir = path.dirname(sourceFilePath);
-  const commonNames = new Set([
-    'constructor', 'properties', 'description', 'connections', 'environment', 
-    'milliseconds', 'get', 'set', 'find', 'create', 'update', 'delete', 
-    'handle', 'process', 'init', 'main', 'config', 'data', 'response', 'request',
-    'metadata', 'options', 'headers', 'params', 'payload', 'result', 'status',
-    'message', 'details', 'values', 'service', 'controller', 'repository', 'helper',
-    'utils', 'constant', 'constants', 'default', 'export', 'import', 'index',
-    'keys', 'types', 'validate', 'resolve', 'reject', 'execute', 'loading', 'active'
-  ]);
 
   // Resolve every import's candidate paths + barrel re-exports ONCE per source node.
   // This is candidate-independent, so doing it inside the candidate loop (7000+ nodes)
@@ -733,9 +858,25 @@ export function resolveConnectionsLocally(
   // extractor named inconsistently (`default`, `Foo.schema`), so name matching fails.
   const nodesPerFile = new Map<string, number>();
   const normFile = (fp: string) => path.resolve(fp).replace(/\\/g, '/').toLowerCase();
+  // Names present per file — used for missing-node detection (does an imported symbol
+  // actually have a node in its file?). Includes each node's name plus its id's symbol parts.
+  const nodeNamesByFile = onMissing ? new Map<string, Set<string>>() : null;
   for (const n of candidateNodes) {
-    const k = normFile(n.file_path);
-    nodesPerFile.set(k, (nodesPerFile.get(k) ?? 0) + 1);
+    for (const p of String(n.file_path).split(',').map(s => s.trim()).filter(Boolean)) {
+      const k = normFile(p);
+      nodesPerFile.set(k, (nodesPerFile.get(k) ?? 0) + 1);
+      if (nodeNamesByFile) {
+        let set = nodeNamesByFile.get(k);
+        if (!set) { set = new Set<string>(); nodeNamesByFile.set(k, set); }
+        set.add(n.name);
+        const parsed = parseNodeId(n.id);
+        if (parsed) {
+          set.add(parsed.symbolName);
+          if (parsed.className) set.add(parsed.className);
+          if (parsed.memberName) set.add(parsed.memberName);
+        }
+      }
+    }
   }
 
   for (const targetNode of candidateNodes) {
@@ -755,6 +896,14 @@ export function resolveConnectionsLocally(
       // Local dependency within same file. Skip when isolation failed — in
       // whole-file-scan mode every symbol would link to every other one.
       if (isolationFailed) continue;
+      // For a sibling method in the SAME class, prefer a `this.<member>` access (precise)
+      // but still accept a bare free reference to the member name.
+      if (
+        memberName && className && className === parsedSource.className && thisMembers.has(memberName)
+      ) {
+        connections.add(targetNode.id);
+        continue;
+      }
       const nameToCheck = memberName || symbolName;
       if (referencedNames.has(nameToCheck)) {
         connections.add(targetNode.id);
@@ -903,13 +1052,59 @@ export function resolveConnectionsLocally(
     // (even in non-JS files) to a same-named node across files.
     if (!isolationFailed && !className && parsedSource.repo === parsedTarget.repo) {
       const nameToCheck = symbolName;
+      // Free-variable analysis already excludes locals, so the old `commonNames` denylist
+      // (which existed to blunt local-var noise) is no longer needed.
       if (nameToCheck.length >= 16 && referencedNames.has(nameToCheck)) {
-        if (!commonNames.has(nameToCheck.toLowerCase())) {
-          connections.add(targetNode.id);
-        }
+        connections.add(targetNode.id);
+      }
+    }
+  }
+
+  // Missing-node detection: a name imported from a real repo file and actually used here,
+  // but with no node in that file, is a Phase-1 extraction gap. (Namespace imports are
+  // skipped — the specific missing symbol can't be attributed. node_modules/bare specifiers
+  // resolve to no repo file and are ignored.)
+  if (onMissing && nodeNamesByFile && isTsOrJs && !isolationFailed) {
+    for (const ri of resolvedImports) {
+      if (ri.isNamespace || !referencedNames.has(ri.importedName)) continue;
+      const file = resolveToExistingFile(ri.paths);
+      if (!file) continue;
+      const names = nodeNamesByFile.get(normFile(file));
+      const satisfied = !!names && (names.has(ri.importedName) || (ri.isDefault && names.size > 0));
+      if (!satisfied) {
+        onMissing({ sourceNodeId, name: ri.importedName, targetFile: file });
       }
     }
   }
 
   return Array.from(connections);
+}
+
+/**
+ * Derive a node's identity/type/code directly from its declaration in a file — deterministic,
+ * no LLM. Used by `--fill-missing` to create nodes that Phase-1 extraction skipped. Returns
+ * null when the file isn't TS/JS or the symbol can't be located.
+ */
+export function extractNodeFromFile(
+  filePath: string,
+  symbolName: string
+): { name: string; type: string; signature: string | null; codeSnapshot: string } | null {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!['.ts', '.tsx', '.js', '.jsx'].includes(ext)) return null;
+  try {
+    const sf = getSourceFile(filePath);
+    const parts = symbolName.split('.');
+    const className = parts.length === 2 ? parts[0] : undefined;
+    const node = findNodeInAst(sf, className, symbolName);
+    if (!node) return null;
+    const code = node.getText(sf);
+    return {
+      name: parts[parts.length - 1] || symbolName,
+      type: astBaseType(node),
+      signature: code.split('\n')[0].slice(0, 200),
+      codeSnapshot: code
+    };
+  } catch {
+    return null;
+  }
 }

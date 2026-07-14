@@ -61,6 +61,14 @@ const nodes: N[] = [
   node('src/utils/mixed.ts', 'Stamper', 'class'),
   node('src/utils/mixed.ts', 'Stamper.formatStamp', 'method'),
   node('src/app/useStamp.ts', 'useStamp'),
+  // free-variable analysis: local shadow must not link to the imported symbol
+  node('src/utils/parse.ts', 'parseThing'),
+  node('src/app/localShadow.ts', 'handleInput'),
+  node('src/app/localShadow.ts', 'realUse'),
+  // same-class method -> method via this.
+  node('src/services/Calc.ts', 'Calc', 'class'),
+  node('src/services/Calc.ts', 'Calc.add', 'method'),
+  node('src/services/Calc.ts', 'Calc.sum', 'method'),
 ];
 
 // Answer key: complete expected target set per source id (by symbol suffix).
@@ -111,6 +119,14 @@ const expected: Record<string, string[]> = {
   'src/utils/mixed.ts#Stamper': [],
   'src/utils/mixed.ts#Stamper.formatStamp': [],
   'src/app/useStamp.ts#useStamp': ['src/utils/mixed.ts#formatStamp'],
+  // free-variable: local shadow does NOT link the import; real use does
+  'src/utils/parse.ts#parseThing': [],
+  'src/app/localShadow.ts#handleInput': [],
+  'src/app/localShadow.ts#realUse': ['src/utils/parse.ts#parseThing'],
+  // same-class this.method edges
+  'src/services/Calc.ts#Calc': ['src/services/Calc.ts#Calc.sum'],
+  'src/services/Calc.ts#Calc.add': ['src/services/Calc.ts#Calc.sum'],
+  'src/services/Calc.ts#Calc.sum': [],
 };
 
 function suffix(id: string): string {

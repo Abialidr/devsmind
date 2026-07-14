@@ -1,0 +1,923 @@
+[
+  {
+    "repo": "harrir-backend-order-service",
+    "file": "src/shared/log-types.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-order-service\\src\\shared\\log-types.ts",
+    "lines": 4,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 1,
+      "topLevelConstsVars": 0,
+      "total": 1
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "enum": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-order-service",
+    "file": "src/controllers/OrderController.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-order-service\\src\\controllers\\OrderController.ts",
+    "lines": 2252,
+    "expected": {
+      "functions": 0,
+      "classes": 1,
+      "methodsInClasses": 28,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 29
+    },
+    "actualTotal": 47,
+    "actualByType": {
+      "class": 1,
+      "variable": 7,
+      "method": 39
+    },
+    "ratio": 1.6206896551724137,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-order-service",
+    "file": "src/functions/ClearWishListCache/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-order-service\\src\\functions\\ClearWishListCache\\app.ts",
+    "lines": 13,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 2,
+      "total": 2
+    },
+    "actualTotal": 2,
+    "actualByType": {
+      "variable": 2
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-order-service",
+    "file": "src/functions/UpdatePromoCode/schema.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-order-service\\src\\functions\\UpdatePromoCode\\schema.ts",
+    "lines": 23,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "validator": 1
+    },
+    "ratio": null,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-order-service",
+    "file": "scripts/build-all.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-order-service\\scripts\\build-all.js",
+    "lines": 103,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 18,
+      "total": 18
+    },
+    "actualTotal": 0,
+    "actualByType": {},
+    "ratio": 0,
+    "flag": "UNDER-EXTRACTED"
+  },
+  {
+    "repo": "harrir-backend-products-service",
+    "file": "src/functions/GetAllBrands/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-products-service\\src\\functions\\GetAllBrands\\app.ts",
+    "lines": 9,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 3
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "variable": 3
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-products-service",
+    "file": "src/controllers/ProductController.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-products-service\\src\\controllers\\ProductController.ts",
+    "lines": 3907,
+    "expected": {
+      "functions": 0,
+      "classes": 1,
+      "methodsInClasses": 10,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 14
+    },
+    "actualTotal": 39,
+    "actualByType": {
+      "class": 1,
+      "variable": 15,
+      "method": 23
+    },
+    "ratio": 2.7857142857142856,
+    "flag": "OVER-EXTRACTED"
+  },
+  {
+    "repo": "harrir-backend-products-service",
+    "file": "src/functions/GetProductVariationsV2/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-products-service\\src\\functions\\GetProductVariationsV2\\app.ts",
+    "lines": 12,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 3
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "variable": 2,
+      "api_endpoint": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-products-service",
+    "file": "src/repositories/HomePageSettingRepository.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-products-service\\src\\repositories\\HomePageSettingRepository.ts",
+    "lines": 19,
+    "expected": {
+      "functions": 0,
+      "classes": 1,
+      "methodsInClasses": 3,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 4
+    },
+    "actualTotal": 4,
+    "actualByType": {
+      "class": 1,
+      "method": 3
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-products-service",
+    "file": "src/interfaces/ICoupon.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-products-service\\src\\interfaces\\ICoupon.ts",
+    "lines": 115,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 8,
+      "typeAliases": 1,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 9
+    },
+    "actualTotal": 9,
+    "actualByType": {
+      "interface": 8,
+      "type_alias": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-user-service",
+    "file": "src/functions/api/v1/UpdateUserLanguage/schema.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-user-service\\src\\functions\\api\\v1\\UpdateUserLanguage\\schema.ts",
+    "lines": 6,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "variable": 1
+    },
+    "ratio": null,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-user-service",
+    "file": "src/controllers/api/v1/UserController.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-user-service\\src\\controllers\\api\\v1\\UserController.ts",
+    "lines": 1584,
+    "expected": {
+      "functions": 0,
+      "classes": 1,
+      "methodsInClasses": 3,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 1,
+      "total": 5
+    },
+    "actualTotal": 24,
+    "actualByType": {
+      "class": 1,
+      "variable": 4,
+      "method": 19
+    },
+    "ratio": 4.8,
+    "flag": "OVER-EXTRACTED"
+  },
+  {
+    "repo": "harrir-backend-user-service",
+    "file": "src/functions/api/v2/VerifySocialUser/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-user-service\\src\\functions\\api\\v2\\VerifySocialUser\\app.ts",
+    "lines": 11,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 2,
+      "total": 2
+    },
+    "actualTotal": 2,
+    "actualByType": {
+      "variable": 1,
+      "function": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-user-service",
+    "file": "src/functions/api/v1/UpsertDeviceToken/schema.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-user-service\\src\\functions\\api\\v1\\UpsertDeviceToken\\schema.ts",
+    "lines": 25,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "validator": 1
+    },
+    "ratio": null,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-user-service",
+    "file": "src/controllers/api/v1/VersionController.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-user-service\\src\\controllers\\api\\v1\\VersionController.ts",
+    "lines": 127,
+    "expected": {
+      "functions": 0,
+      "classes": 1,
+      "methodsInClasses": 3,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 4
+    },
+    "actualTotal": 7,
+    "actualByType": {
+      "class": 1,
+      "variable": 2,
+      "method": 4
+    },
+    "ratio": 1.75,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-zoho-service",
+    "file": "src/functions/AddProductCron/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-zoho-service\\src\\functions\\AddProductCron\\app.ts",
+    "lines": 11,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 3
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "variable": 3
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-zoho-service",
+    "file": "src/functions/CreateInvoiceInZohoSQS/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-zoho-service\\src\\functions\\CreateInvoiceInZohoSQS\\app.ts",
+    "lines": 2678,
+    "expected": {
+      "functions": 86,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 12,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 7,
+      "total": 105
+    },
+    "actualTotal": 105,
+    "actualByType": {
+      "constant": 6,
+      "variable": 1,
+      "interface": 12,
+      "function": 86
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-zoho-service",
+    "file": "src/functions/CreateUserInZohoSQS/app.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-zoho-service\\src\\functions\\CreateUserInZohoSQS\\app.ts",
+    "lines": 12,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 3
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "variable": 2,
+      "function": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-zoho-service",
+    "file": "src/shared/response-builder.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-zoho-service\\src\\shared\\response-builder.ts",
+    "lines": 16,
+    "expected": {
+      "functions": 0,
+      "classes": 1,
+      "methodsInClasses": 1,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 2
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "class": 1
+    },
+    "ratio": 0.5,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-backend-zoho-service",
+    "file": "src/functions/CreateLeadInZoho/schema.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-backend-zoho-service\\src\\functions\\CreateLeadInZoho\\schema.ts",
+    "lines": 107,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 3
+    },
+    "actualTotal": 4,
+    "actualByType": {
+      "constant": 3,
+      "validator": 1
+    },
+    "ratio": 1.3333333333333333,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-express-backend",
+    "file": "src/config/database.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-express-backend\\src\\config\\database.ts",
+    "lines": 4,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 0,
+    "actualByType": {},
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-express-backend",
+    "file": "src/controllers/OrderController.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-express-backend\\src\\controllers\\OrderController.ts",
+    "lines": 5223,
+    "expected": {
+      "functions": 104,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 7,
+      "typeAliases": 2,
+      "enums": 0,
+      "topLevelConstsVars": 14,
+      "total": 127
+    },
+    "actualTotal": 142,
+    "actualByType": {
+      "constant": 12,
+      "function": 104,
+      "type_alias": 2,
+      "interface": 7,
+      "variable": 1,
+      "rest_controller": 1,
+      "method": 1,
+      "route_handler": 14
+    },
+    "ratio": 1.1181102362204725,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-express-backend",
+    "file": "src/worker.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-express-backend\\src\\worker.ts",
+    "lines": 35,
+    "expected": {
+      "functions": 1,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 1
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "function": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-express-backend",
+    "file": "src/types/homepage.types.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-express-backend\\src\\types\\homepage.types.ts",
+    "lines": 113,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 10,
+      "typeAliases": 1,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 11
+    },
+    "actualTotal": 11,
+    "actualByType": {
+      "type_alias": 1,
+      "interface": 10
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-express-backend",
+    "file": "src/scripts/validate-postman.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-express-backend\\src\\scripts\\validate-postman.js",
+    "lines": 302,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 8,
+      "total": 8
+    },
+    "actualTotal": 0,
+    "actualByType": {},
+    "ratio": 0,
+    "flag": "UNDER-EXTRACTED"
+  },
+  {
+    "repo": "harrir-mini-app",
+    "file": "components/skeletons/address-item-skeleton/address-item-skeleton.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-mini-app\\components\\skeletons\\address-item-skeleton\\address-item-skeleton.js",
+    "lines": 5,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 0,
+    "actualByType": {},
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-mini-app",
+    "file": "components/ai-stylist/ai-stylist.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-mini-app\\components\\ai-stylist\\ai-stylist.js",
+    "lines": 1709,
+    "expected": {
+      "functions": 3,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 6
+    },
+    "actualTotal": 95,
+    "actualByType": {
+      "constant": 3,
+      "function": 3,
+      "class": 1,
+      "variable": 29,
+      "method": 59
+    },
+    "ratio": 15.833333333333334,
+    "flag": "OVER-EXTRACTED"
+  },
+  {
+    "repo": "harrir-mini-app",
+    "file": "components/ui-button/ui-button.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-mini-app\\components\\ui-button\\ui-button.js",
+    "lines": 46,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "class": 1,
+      "method": 2
+    },
+    "ratio": null,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-mini-app",
+    "file": "components/size-sheet/size-sheet.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-mini-app\\components\\size-sheet\\size-sheet.js",
+    "lines": 105,
+    "expected": {
+      "functions": 0,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 0
+    },
+    "actualTotal": 9,
+    "actualByType": {
+      "react_component": 1,
+      "method": 8
+    },
+    "ratio": null,
+    "flag": "OVER (expected ~0 top-level constructs but nodes exist — likely nested/nonstandard extraction)"
+  },
+  {
+    "repo": "harrir-mini-app",
+    "file": "data/services/ProductsService.js",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-mini-app\\data\\services\\ProductsService.js",
+    "lines": 259,
+    "expected": {
+      "functions": 1,
+      "classes": 1,
+      "methodsInClasses": 25,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 2,
+      "total": 29
+    },
+    "actualTotal": 30,
+    "actualByType": {
+      "variable": 2,
+      "function": 1,
+      "class": 1,
+      "method": 26
+    },
+    "ratio": 1.0344827586206897,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web",
+    "file": "app/category/loading.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web\\app\\category\\loading.tsx",
+    "lines": 6,
+    "expected": {
+      "functions": 1,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 1
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "function": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web",
+    "file": "store/api.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web\\store\\api.ts",
+    "lines": 2344,
+    "expected": {
+      "functions": 24,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 63,
+      "enums": 0,
+      "topLevelConstsVars": 5,
+      "total": 92
+    },
+    "actualTotal": 141,
+    "actualByType": {
+      "type_alias": 63,
+      "function": 23,
+      "constant": 4,
+      "variable": 1,
+      "nest_service": 1,
+      "api_endpoint": 49
+    },
+    "ratio": 1.5326086956521738,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web",
+    "file": "app/api/user/addresses/route.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web\\app\\api\\user\\addresses\\route.ts",
+    "lines": 27,
+    "expected": {
+      "functions": 3,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 3
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "next_api_route": 3
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web",
+    "file": "app/user/onboarding/components/HighlightedLocalizedText.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web\\app\\user\\onboarding\\components\\HighlightedLocalizedText.tsx",
+    "lines": 69,
+    "expected": {
+      "functions": 2,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 1,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 3
+    },
+    "actualTotal": 3,
+    "actualByType": {
+      "type_alias": 1,
+      "function": 1,
+      "react_component": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web",
+    "file": "store/productDetailsSlice.ts",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web\\store\\productDetailsSlice.ts",
+    "lines": 133,
+    "expected": {
+      "functions": 3,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 3,
+      "enums": 0,
+      "topLevelConstsVars": 3,
+      "total": 9
+    },
+    "actualTotal": 12,
+    "actualByType": {
+      "type_alias": 3,
+      "constant": 1,
+      "function": 4,
+      "module": 1,
+      "method": 2,
+      "variable": 1
+    },
+    "ratio": 1.3333333333333333,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web-admin",
+    "file": "app/(admin)/settings/home-page/page.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web-admin\\app\\(admin)\\settings\\home-page\\page.tsx",
+    "lines": 5,
+    "expected": {
+      "functions": 1,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 1
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "react_component": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web-admin",
+    "file": "components/homepage-settings.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web-admin\\components\\homepage-settings.tsx",
+    "lines": 1545,
+    "expected": {
+      "functions": 3,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 1,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 4
+    },
+    "actualTotal": 18,
+    "actualByType": {
+      "type_alias": 1,
+      "function": 16,
+      "react_component": 1
+    },
+    "ratio": 4.5,
+    "flag": "OVER-EXTRACTED"
+  },
+  {
+    "repo": "harrir-web-admin",
+    "file": "app/(admin)/orders/dashboard/_components/MetricsGrid.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web-admin\\app\\(admin)\\orders\\dashboard\\_components\\MetricsGrid.tsx",
+    "lines": 41,
+    "expected": {
+      "functions": 1,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 1
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "react_component": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web-admin",
+    "file": "app/(admin)/layout.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web-admin\\app\\(admin)\\layout.tsx",
+    "lines": 97,
+    "expected": {
+      "functions": 1,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 0,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 1
+    },
+    "actualTotal": 1,
+    "actualByType": {
+      "next_layout": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  },
+  {
+    "repo": "harrir-web-admin",
+    "file": "components/homepage/SpotlightItemEditor.tsx",
+    "absPath": "C:\\work\\Hanoot\\backend\\lamda\\harrir-web-admin\\components\\homepage\\SpotlightItemEditor.tsx",
+    "lines": 228,
+    "expected": {
+      "functions": 1,
+      "classes": 0,
+      "methodsInClasses": 0,
+      "interfaces": 1,
+      "typeAliases": 0,
+      "enums": 0,
+      "topLevelConstsVars": 0,
+      "total": 2
+    },
+    "actualTotal": 2,
+    "actualByType": {
+      "interface": 1,
+      "react_component": 1
+    },
+    "ratio": 1,
+    "flag": "OK"
+  }
+]

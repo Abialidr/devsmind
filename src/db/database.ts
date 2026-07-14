@@ -249,16 +249,27 @@ export class DevMindDatabase {
   deleteNode(id: string) {
     const node = this.getNode(id);
     const resolvedId = node ? node.id : id;
+    // Capture caller files, and delete the node's history JSONs, BEFORE the row (and its
+    // cascade-deleted history rows / edges) is gone. Without the JSON cleanup, syncFromDisk()
+    // would resurrect the node from its lingering history/[id].json on the next server start.
+    const inboundSourceFiles = this.collectInboundSourceFiles(resolvedId);
+    this.deleteHistoryFilesForNode(resolvedId);
     const stmt = this.db.prepare('DELETE FROM nodes WHERE id = ?');
     stmt.run(resolvedId);
     if (node && node.file_path) {
       this.writeGraphToDisk(node.file_path);
+    }
+    for (const p of inboundSourceFiles) {
+      this.writeGraphToDisk(p);
     }
   }
 
   deprecateNode(id: string) {
     const node = this.getNode(id);
     const resolvedId = node ? node.id : id;
+    // Capture the caller files BEFORE we delete the inbound edges — afterwards the join
+    // that finds them returns nothing.
+    const inboundSourceFiles = this.collectInboundSourceFiles(resolvedId);
     const updateStmt = this.db.prepare('UPDATE nodes SET deprecated = 1 WHERE id = ?');
     const deleteConnStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? OR target_node_id = ?');
     const tx = this.db.transaction(() => {
@@ -266,8 +277,13 @@ export class DevMindDatabase {
       deleteConnStmt.run(resolvedId, resolvedId);
     });
     tx();
+    // Rewrite the node's own file (now carrying deprecated:1) and every caller file (so their
+    // stale inbound edges don't resurrect the connection on the next syncFromDisk()).
     if (node && node.file_path) {
       this.writeGraphToDisk(node.file_path);
+    }
+    for (const p of inboundSourceFiles) {
+      this.writeGraphToDisk(p);
     }
   }
 
@@ -317,17 +333,7 @@ export class DevMindDatabase {
       // (which still reference oldId on disk). The DB was already repointed to newId above,
       // so rewrite each such file — otherwise syncFromDisk reloads the stale oldId edge and
       // the renamed node silently loses all its inbound ("used-by") edges.
-      const inboundSourceFiles = this.db.prepare(`
-        SELECT DISTINCT n.file_path AS file_path
-        FROM node_connections c JOIN nodes n ON n.id = c.source_node_id
-        WHERE c.target_node_id = ?
-      `).all(newId) as { file_path: string }[];
-      for (const row of inboundSourceFiles) {
-        if (!row.file_path) continue;
-        for (const p of row.file_path.split(',').map(s => s.trim()).filter(Boolean)) {
-          this.writeGraphToDisk(p);
-        }
-      }
+      this.rewriteInboundSourceFiles(newId);
 
       // Keep the committed history/*.json files in sync with the rename. Without this,
       // syncFromDisk() on the next server start would find the old node_id (which no
@@ -375,6 +381,58 @@ export class DevMindDatabase {
     }
   }
 
+  /**
+   * Collects the distinct file paths of every SOURCE node that has an OUTGOING edge pointing
+   * INTO `nodeId` (i.e. this node's "used-by" callers). Those inbound edges live on disk in the
+   * source nodes' files, not in the target's own file. Callers that DELETE the inbound edges
+   * (deprecate/delete) must call this BEFORE the deletion to capture the affected files;
+   * callers that merely repoint them (rename) can rewrite after the fact.
+   */
+  private collectInboundSourceFiles(nodeId: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT n.file_path AS file_path
+      FROM node_connections c JOIN nodes n ON n.id = c.source_node_id
+      WHERE c.target_node_id = ?
+    `).all(nodeId) as { file_path: string }[];
+    const files = new Set<string>();
+    for (const row of rows) {
+      if (!row.file_path) continue;
+      for (const p of row.file_path.split(',').map(s => s.trim()).filter(Boolean)) {
+        files.add(p);
+      }
+    }
+    return Array.from(files);
+  }
+
+  /**
+   * Re-syncs each given source file's graph JSON. Used after the DB has been mutated so that
+   * syncFromDisk() won't reload a stale inbound ("used-by") edge on the next server start.
+   */
+  private rewriteInboundSourceFiles(nodeId: string) {
+    for (const p of this.collectInboundSourceFiles(nodeId)) {
+      this.writeGraphToDisk(p);
+    }
+  }
+
+  /**
+   * Deletes the committed history/[id].json files for every history record of `nodeId`.
+   * Used on HARD delete so that syncFromDisk()'s history pass can't resurrect the node
+   * (and its metadata) from a lingering JSON on the next server start. Reads the history
+   * ids BEFORE the DB rows are removed, so call this while they still exist (or pass ids in).
+   */
+  private deleteHistoryFilesForNode(nodeId: string) {
+    try {
+      const historyDir = path.join(path.dirname(this.dbPath), 'history');
+      const rows = this.db.prepare('SELECT id FROM history WHERE node_id = ?').all(nodeId) as { id: string }[];
+      for (const row of rows) {
+        const filePath = path.join(historyDir, `${row.id}.json`);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
+    } catch (err) {
+      console.warn('⚠️ SQLite warning: Failed to delete history JSON(s) on disk:', err);
+    }
+  }
+
   // --- Connection Operations ---
 
   addConnection(sourceNodeId: string, targetNodeId: string) {
@@ -383,6 +441,20 @@ export class DevMindDatabase {
     const resolvedSrc = srcNode ? srcNode.id : sourceNodeId;
     const resolvedTgt = tgtNode ? tgtNode.id : targetNodeId;
     
+    // The on-disk graph format is node-anchored: each file's JSON lists its nodes and their
+    // OUTGOING edges. An edge whose SOURCE node doesn't exist has nowhere to be written on
+    // disk, so it would live only in brain.db and be silently dropped by syncFromDisk() on the
+    // next server start. Rather than leak that DB-only orphan, refuse the edge and tell the
+    // caller to add the source node first (the two-phase indexing protocol already does this).
+    if (!srcNode) {
+      console.warn(
+        `⚠️ DevsMind: connection skipped — source node "${sourceNodeId}" does not exist in ` +
+        `the graph. Add it (stage_change / update_history) before connecting it, otherwise the edge ` +
+        `cannot be persisted to disk and would not survive a restart.`
+      );
+      return;
+    }
+
     this.db.pragma('foreign_keys = OFF');
     try {
       const stmt = this.db.prepare(`
@@ -390,7 +462,7 @@ export class DevMindDatabase {
         VALUES (?, ?)
       `);
       stmt.run(resolvedSrc, resolvedTgt);
-      if (srcNode && srcNode.file_path) {
+      if (srcNode.file_path) {
         this.writeGraphToDisk(srcNode.file_path);
       }
     } finally {
@@ -931,6 +1003,17 @@ export class DevMindDatabase {
     }
 
     if (idsToDelete.length > 0) {
+      // Capture caller files and drop the pruned nodes' history JSONs BEFORE the tx: the
+      // inbound-edge join goes empty once edges are deleted, and the history rows (whose ids
+      // name the JSON files) are removed by deleteHistoryStmt. Without the JSON cleanup, a
+      // pruned node would resurrect from its history/[id].json on the next syncFromDisk().
+      for (const id of idsToDelete) {
+        for (const p of this.collectInboundSourceFiles(id)) {
+          affectedFilePaths.add(p);
+        }
+        this.deleteHistoryFilesForNode(id);
+      }
+
       const updateStmt = this.db.prepare('UPDATE nodes SET deprecated = 1 WHERE id = ?');
       const deleteConnStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? OR target_node_id = ?');
       const deleteHistoryStmt = this.db.prepare('DELETE FROM history WHERE node_id = ?');
@@ -943,9 +1026,9 @@ export class DevMindDatabase {
       });
       deprecateTx(idsToDelete);
 
-      // Keep the committed graph/*.json files in sync with the DB. Without this,
-      // syncFromDisk() on the next server start would re-insert the just-pruned
-      // nodes right back into the database, since it trusts disk as source of truth.
+      // Keep the committed graph/*.json files in sync with the DB. Pruned nodes are written
+      // with deprecated:1 (so they don't come back as active), and every caller file is
+      // rewritten so its stale inbound edge doesn't resurrect the connection on next start.
       for (const filePath of affectedFilePaths) {
         this.writeGraphToDisk(filePath);
       }
@@ -1142,7 +1225,7 @@ export class DevMindDatabase {
           const deleteConnsForNodesStmt = this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ?');
           const insertNodeStmt = this.db.prepare(`
             INSERT OR REPLACE INTO nodes (id, type, name, file_path, signature, deprecated)
-            VALUES (?, ?, ?, ?, ?, 0)
+            VALUES (?, ?, ?, ?, ?, ?)
           `);
           const insertConnStmt = this.db.prepare(`
             INSERT OR IGNORE INTO node_connections (source_node_id, target_node_id)
@@ -1170,7 +1253,7 @@ export class DevMindDatabase {
                 const nodes = data.nodes || [];
                 for (const n of nodes) {
                   deleteConnsForNodesStmt.run(n.id);
-                  insertNodeStmt.run(n.id, n.type, n.name, fileAbsPath, n.signature || null);
+                  insertNodeStmt.run(n.id, n.type, n.name, fileAbsPath, n.signature || null, n.deprecated ? 1 : 0);
                 }
 
                 // Insert connections
@@ -1210,15 +1293,18 @@ export class DevMindDatabase {
       const diskRelPath = repoRelPath.replace(/^\{([^}]+)\}/, '$1').replace(/\.[^/.]+$/, '.json');
       const graphJsonPath = path.join(workspaceRoot, 'graph', diskRelPath);
 
-      // Get all active nodes in this file. A node's file_path is either exactly this
-      // absolute path, or (for the rare node spanning multiple files) a ", "-joined list
-      // containing it. We anchor on the FULL absolute path with ", " boundaries and escape
+      // Get all nodes in this file (active AND deprecated). A node's file_path is either
+      // exactly this absolute path, or (for the rare node spanning multiple files) a ", "-joined
+      // list containing it. We anchor on the FULL absolute path with ", " boundaries and escape
       // LIKE metacharacters — the old `%<relpath>%` / `%<relpath>` matched short relative
       // suffixes shared across repos, pulling in (and later corrupting) other repos' nodes.
+      // Deprecated nodes are INCLUDED (and carry deprecated:1 in the JSON) so that deprecation
+      // is durable across a syncFromDisk() restart and propagates to teammates via git —
+      // otherwise the node's history JSON would resurrect it as active on the next start.
       const absEsc = this.likeEscape(absPath);
       const stmtNodes = this.db.prepare(`
         SELECT * FROM nodes
-        WHERE deprecated = 0 AND (
+        WHERE (
           file_path = ? OR
           file_path LIKE ? ESCAPE '\\' OR
           file_path LIKE ? ESCAPE '\\' OR
@@ -1262,7 +1348,8 @@ export class DevMindDatabase {
           id: n.id,
           name: n.name,
           type: n.type,
-          signature: n.signature
+          signature: n.signature,
+          deprecated: n.deprecated ? 1 : 0
         })),
         connections: connections.map(c => ({
           source_node_id: c.source_node_id,

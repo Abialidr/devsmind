@@ -16,9 +16,42 @@ import {
   completeScratchpad
 } from '../db/indexer';
 import { scanRepoFiles } from '../utils/scanner';
+import { stageEntry, readStaged, clearStaged, commitStagedChanges, StagedEntry } from '../db/staging';
 
 // â”€â”€â”€ Port: devsâ†’D(4)E(5)=45 + mindâ†’M(13)=13 â†’ 4513 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export const DEVSMIND_PORT = 4513;
+
+// Shared node-type taxonomy description, reused by update_history and stage_change.
+const NODE_TYPE_DESCRIPTION =
+  'The type of node. Be highly specific and framework-aware. Choose from the taxonomy below (or use a custom value if nothing fits).\n\n' +
+  'UNIVERSAL: function | method | class | abstract_class | interface | type_alias | enum | constant | variable | module | namespace | decorator\n\n' +
+  'NESTJS: nest_module | nest_controller | nest_service | nest_provider | nest_guard | nest_interceptor | nest_pipe | nest_filter | nest_decorator | nest_middleware | nest_gateway | nest_resolver | nest_schema | nest_dto\n\n' +
+  'EXPRESS/FASTIFY/KOA/HONO: route_handler | middleware | router\n\n' +
+  'SPRING (Java): spring_controller | spring_service | spring_repository | spring_component | spring_bean | spring_config | spring_entity\n\n' +
+  'DJANGO/FASTAPI (Python): django_view | django_model | django_serializer | django_form | django_signal | fastapi_router | fastapi_dependency\n\n' +
+  'GO: go_handler | go_middleware | go_struct | go_interface | go_func\n\n' +
+  'RUST: rust_struct | rust_impl | rust_trait | rust_enum | rust_fn | rust_macro\n\n' +
+  'REACT: react_component | react_hook | react_context | react_hoc | react_page\n\n' +
+  'NEXT.JS: next_page | next_layout | next_api_route | next_server_action | next_middleware\n\n' +
+  'VUE: vue_component | vue_composable | vue_directive | vue_store_module\n\n' +
+  'ANGULAR: ng_component | ng_service | ng_directive | ng_pipe | ng_module | ng_guard | ng_interceptor | ng_resolver\n\n' +
+  'SVELTE: svelte_component | svelte_store | svelte_action\n\n' +
+  'ORM â€” PRISMA: prisma_model | prisma_query | prisma_migration\n' +
+  'ORM â€” TYPEORM: typeorm_entity | typeorm_repository | typeorm_migration\n' +
+  'ORM â€” MONGOOSE: mongoose_model | mongoose_schema\n' +
+  'ORM â€” SQLALCHEMY: sqlalchemy_model | sqlalchemy_query\n' +
+  'ORM â€” SEQUELIZE: sequelize_model | sequelize_migration\n\n' +
+  'REST/API: api_endpoint | rest_controller\n' +
+  'GRAPHQL: graphql_resolver | graphql_query | graphql_mutation | graphql_subscription | graphql_schema | graphql_directive\n' +
+  'GRPC/PROTO: grpc_service | grpc_method | proto_message\n' +
+  'WEBSOCKET: ws_gateway | ws_handler\n' +
+  'MESSAGE QUEUE: mq_producer | mq_consumer | mq_handler\n\n' +
+  'CONFIG/AUTH: config_loader | env_config | feature_flag | auth_guard | auth_strategy | jwt_util | permission_policy\n' +
+  'OBSERVABILITY: logger | metric | trace_span\n' +
+  'CLI: cli_command | cli_option\n' +
+  'SCRIPTS: build_script | migration_script | seed_script\n' +
+  'TESTS: test_suite | test_case | test_helper | mock | fixture\n' +
+  'UTILITY: util_function | helper | transformer | validator | formatter';
 
 // Cache database connections by their resolved path to avoid re-opening constantly
 const dbCache = new Map<string, DevMindDatabase>();
@@ -136,7 +169,7 @@ function createMcpServer(): Server {
         {
           name: 'get_node_code',
           description:
-            'Returns only the latest code snapshot stored for a node. Token-efficient alternative to get_node_history when you only need the current code. Returns null if no snapshot exists â€” in that case you MUST read the file, then call update_history to store the code so future agents benefit from the cache.',
+            'Returns only the latest code snapshot stored for a node. Token-efficient alternative to get_node_history when you only need the current code. Returns null if no snapshot exists â€” in that case you MUST read the file, then stage_change + commit_changes to store the code so future agents benefit from the cache.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -152,109 +185,10 @@ function createMcpServer(): Server {
             required: ['devmind_path', 'node_id']
           }
         },
-        {
-          name: 'update_history',
-          description:
-            'Update the version history of a code node (applies the 1-hour session boundary rule). Also creates the node if it does not exist.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              devmind_path: {
-                type: 'string',
-                description: 'Absolute path to the .devmind directory'
-              },
-              node_id: {
-                type: 'string',
-                description:
-                  'Unique identifier for the node (e.g. function/method identifier)'
-              },
-              file_path: {
-                type: 'string',
-                description: 'Source file path where the node is located'
-              },
-              code_snapshot: {
-                type: 'string',
-                description: 'Full source code content of the node at this moment'
-              },
-              reasoning: {
-                type: 'object',
-                description: 'Structured details about this change',
-                properties: {
-                  what_changed: {
-                    type: 'string',
-                    description: 'Brief description of the modified code'
-                  },
-                  why: { type: 'string', description: 'The reason this change was made' },
-                  goal: { type: 'string', description: 'What was being achieved' },
-                  requirement: {
-                    type: 'string',
-                    description: 'Ticket / issue / user request ID if applicable'
-                  },
-                  previous_state: {
-                    type: 'string',
-                    description: 'What the code looked like before and why it was a problem'
-                  },
-                  decision: {
-                    type: 'string',
-                    description: 'Architectural or implementation decision and why'
-                  },
-                  developer: { type: 'string', description: 'Name of the developer' },
-                  model: { type: 'string', description: 'AI model name used' }
-                },
-                required: ['what_changed', 'why', 'goal']
-              },
-              name: {
-                type: 'string',
-                description:
-                  'Display name of the node (optional, will be inferred if omitted)'
-              },
-              type: {
-                type: 'string',
-                description:
-                  '(optional, defaults to function) The type of node. Be highly specific and framework-aware. Choose from the taxonomy below (or use a custom value if nothing fits).\n\n' +
-                  'UNIVERSAL: function | method | class | abstract_class | interface | type_alias | enum | constant | variable | module | namespace | decorator\n\n' +
-                  'NESTJS: nest_module | nest_controller | nest_service | nest_provider | nest_guard | nest_interceptor | nest_pipe | nest_filter | nest_decorator | nest_middleware | nest_gateway | nest_resolver | nest_schema | nest_dto\n\n' +
-                  'EXPRESS/FASTIFY/KOA/HONO: route_handler | middleware | router\n\n' +
-                  'SPRING (Java): spring_controller | spring_service | spring_repository | spring_component | spring_bean | spring_config | spring_entity\n\n' +
-                  'DJANGO/FASTAPI (Python): django_view | django_model | django_serializer | django_form | django_signal | fastapi_router | fastapi_dependency\n\n' +
-                  'GO: go_handler | go_middleware | go_struct | go_interface | go_func\n\n' +
-                  'RUST: rust_struct | rust_impl | rust_trait | rust_enum | rust_fn | rust_macro\n\n' +
-                  'REACT: react_component | react_hook | react_context | react_hoc | react_page\n\n' +
-                  'NEXT.JS: next_page | next_layout | next_api_route | next_server_action | next_middleware\n\n' +
-                  'VUE: vue_component | vue_composable | vue_directive | vue_store_module\n\n' +
-                  'ANGULAR: ng_component | ng_service | ng_directive | ng_pipe | ng_module | ng_guard | ng_interceptor | ng_resolver\n\n' +
-                  'SVELTE: svelte_component | svelte_store | svelte_action\n\n' +
-                  'ORM â€” PRISMA: prisma_model | prisma_query | prisma_migration\n' +
-                  'ORM â€” TYPEORM: typeorm_entity | typeorm_repository | typeorm_migration\n' +
-                  'ORM â€” MONGOOSE: mongoose_model | mongoose_schema\n' +
-                  'ORM â€” SQLALCHEMY: sqlalchemy_model | sqlalchemy_query\n' +
-                  'ORM â€” SEQUELIZE: sequelize_model | sequelize_migration\n\n' +
-                  'REST/API: api_endpoint | rest_controller\n' +
-                  'GRAPHQL: graphql_resolver | graphql_query | graphql_mutation | graphql_subscription | graphql_schema | graphql_directive\n' +
-                  'GRPC/PROTO: grpc_service | grpc_method | proto_message\n' +
-                  'WEBSOCKET: ws_gateway | ws_handler\n' +
-                  'MESSAGE QUEUE: mq_producer | mq_consumer | mq_handler\n\n' +
-                  'CONFIG/AUTH: config_loader | env_config | feature_flag | auth_guard | auth_strategy | jwt_util | permission_policy\n' +
-                  'OBSERVABILITY: logger | metric | trace_span\n' +
-                  'CLI: cli_command | cli_option\n' +
-                  'SCRIPTS: build_script | migration_script | seed_script\n' +
-                  'TESTS: test_suite | test_case | test_helper | mock | fixture\n' +
-                  'UTILITY: util_function | helper | transformer | validator | formatter'
-              },
-              signature: {
-                type: 'string',
-                description:
-                  'Function parameter types and return type signature (optional)'
-              },
-              session_id: {
-                type: 'string',
-                description:
-                  'Session identifier to associate with this history update (optional)'
-              }
-            },
-            required: ['devmind_path', 'node_id', 'file_path', 'code_snapshot', 'reasoning']
-          }
-        },
+        // NOTE: `update_history`, `add_node`, and `add_connection` are intentionally NOT listed
+        // here. They are deprecated in favour of `stage_change` + `commit_changes` (to avoid
+        // confusing the AI with overlapping write tools), but their handlers are retained below
+        // so any direct/legacy call still works.
         // ────────────────── Indexing tools ─────────────────────────────────────────
         {
           name: 'index_start',
@@ -315,66 +249,49 @@ function createMcpServer(): Server {
           }
         },
         {
-          name: 'add_node',
+          name: 'stage_change',
           description:
-            'Add or update a code node in the graph (function, method, class, service, controller, type, interface, schema, enum, variable, etc.). Called during indexing for every entity found.',
+            'Stage ONE changed code node (function/class/method/etc.) into a buffer without writing to the graph yet. Call this once for EVERY file/entity you touched during a task — passing only the code and reasoning; you do NOT reason about connections here. When you are done with all the files, call commit_changes ONCE — it creates every node, writes every history entry, and resolves all connections between them via local AST in a single pass (so a call from one changed file into another resolves correctly no matter which order you staged them). Staging is buffered on disk, so it survives a context reset. ⚠️ YOU MUST CALL commit_changes at the end, or nothing is written to the graph.',
           inputSchema: {
             type: 'object',
             properties: {
               devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
-              node_id: { type: 'string', description: 'Unique identifier e.g. "CartService.applyPromoCode" or "calculateDiscount"' },
-              name: { type: 'string', description: 'Display name of the node' },
-              type: {
-                type: 'string',
-                description:
-                  'The type of node. Be highly specific and framework-aware. Choose from the taxonomy below (or use a custom value if nothing fits).\n\n' +
-                  'UNIVERSAL: function | method | class | abstract_class | interface | type_alias | enum | constant | variable | module | namespace | decorator\n\n' +
-                  'NESTJS: nest_module | nest_controller | nest_service | nest_provider | nest_guard | nest_interceptor | nest_pipe | nest_filter | nest_decorator | nest_middleware | nest_gateway | nest_resolver | nest_schema | nest_dto\n\n' +
-                  'EXPRESS/FASTIFY/KOA/HONO: route_handler | middleware | router\n\n' +
-                  'SPRING (Java): spring_controller | spring_service | spring_repository | spring_component | spring_bean | spring_config | spring_entity\n\n' +
-                  'DJANGO/FASTAPI (Python): django_view | django_model | django_serializer | django_form | django_signal | fastapi_router | fastapi_dependency\n\n' +
-                  'GO: go_handler | go_middleware | go_struct | go_interface | go_func\n\n' +
-                  'RUST: rust_struct | rust_impl | rust_trait | rust_enum | rust_fn | rust_macro\n\n' +
-                  'REACT: react_component | react_hook | react_context | react_hoc | react_page\n\n' +
-                  'NEXT.JS: next_page | next_layout | next_api_route | next_server_action | next_middleware\n\n' +
-                  'VUE: vue_component | vue_composable | vue_directive | vue_store_module\n\n' +
-                  'ANGULAR: ng_component | ng_service | ng_directive | ng_pipe | ng_module | ng_guard | ng_interceptor | ng_resolver\n\n' +
-                  'SVELTE: svelte_component | svelte_store | svelte_action\n\n' +
-                  'ORM â€” PRISMA: prisma_model | prisma_query | prisma_migration\n' +
-                  'ORM â€” TYPEORM: typeorm_entity | typeorm_repository | typeorm_migration\n' +
-                  'ORM â€” MONGOOSE: mongoose_model | mongoose_schema\n' +
-                  'ORM â€” SQLALCHEMY: sqlalchemy_model | sqlalchemy_query\n' +
-                  'ORM â€” SEQUELIZE: sequelize_model | sequelize_migration\n\n' +
-                  'REST/API: api_endpoint | rest_controller\n' +
-                  'GRAPHQL: graphql_resolver | graphql_query | graphql_mutation | graphql_subscription | graphql_schema | graphql_directive\n' +
-                  'GRPC/PROTO: grpc_service | grpc_method | proto_message\n' +
-                  'WEBSOCKET: ws_gateway | ws_handler\n' +
-                  'MESSAGE QUEUE: mq_producer | mq_consumer | mq_handler\n\n' +
-                  'CONFIG/AUTH: config_loader | env_config | feature_flag | auth_guard | auth_strategy | jwt_util | permission_policy\n' +
-                  'OBSERVABILITY: logger | metric | trace_span\n' +
-                  'CLI: cli_command | cli_option\n' +
-                  'SCRIPTS: build_script | migration_script | seed_script\n' +
-                  'TESTS: test_suite | test_case | test_helper | mock | fixture\n' +
-                  'UTILITY: util_function | helper | transformer | validator | formatter'
+              node_id: { type: 'string', description: 'Unique identifier for the node (e.g. "CartService.applyPromoCode" or "calculateDiscount")' },
+              file_path: { type: 'string', description: 'Source file path where the node is located' },
+              code_snapshot: { type: 'string', description: 'Full source code content of the node at this moment' },
+              reasoning: {
+                type: 'object',
+                description: 'Structured details about this change',
+                properties: {
+                  what_changed: { type: 'string', description: 'Brief description of the modified code' },
+                  why: { type: 'string', description: 'The reason this change was made' },
+                  goal: { type: 'string', description: 'What was being achieved' },
+                  requirement: { type: 'string', description: 'Ticket / issue / user request ID if applicable' },
+                  previous_state: { type: 'string', description: 'What the code looked like before and why it was a problem' },
+                  decision: { type: 'string', description: 'Architectural or implementation decision and why' },
+                  developer: { type: 'string', description: 'Name of the developer' },
+                  model: { type: 'string', description: 'AI model name used' }
+                },
+                required: ['what_changed', 'why', 'goal']
               },
-              file_path: { type: 'string', description: 'Absolute path to the source file' },
-              signature: { type: 'string', description: 'Parameter types + return type (optional)' }
+              name: { type: 'string', description: 'Display name of the node (optional, inferred if omitted)' },
+              type: { type: 'string', description: '(optional, defaults to function) ' + NODE_TYPE_DESCRIPTION },
+              signature: { type: 'string', description: 'Parameter types + return type signature (optional)' },
+              session_id: { type: 'string', description: 'Session identifier to associate with this change (optional)' }
             },
-            required: ['devmind_path', 'node_id', 'name', 'type', 'file_path']
+            required: ['devmind_path', 'node_id', 'file_path', 'code_snapshot', 'reasoning']
           }
         },
         {
-          name: 'add_connection',
+          name: 'commit_changes',
           description:
-            'Add a directional relationship between two nodes: source USES/CALLS target. Called during indexing to map the dependency graph.',
+            'Commit all buffered stage_change entries in one atomic pass: creates/updates every staged node, writes every history snapshot, then resolves all connections between the staged nodes (and into the existing graph) via local AST — auto-creating any referenced-but-missing target nodes. Clears the buffer on success. Call this exactly once after you have finished staging every file you touched.',
           inputSchema: {
             type: 'object',
             properties: {
-              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
-              source_node_id: { type: 'string', description: 'The node that calls or uses the target' },
-              target_node_id: { type: 'string', description: 'The node being called or used' }
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' }
             },
-            required: ['devmind_path', 'source_node_id', 'target_node_id']
+            required: ['devmind_path']
           }
         },
         {
@@ -613,7 +530,7 @@ function createMcpServer(): Server {
               content: [{ type: 'text', text: JSON.stringify({
                 exists: false,
                 node_id: nodeId,
-                message: 'No code snapshot found. Read the source file, then call update_history to cache the code so future agents skip the file read entirely.'
+                message: 'No code snapshot found. Read the source file, then stage_change + commit_changes to cache the code so future agents skip the file read entirely.'
               }) }]
             };
           }
@@ -629,45 +546,24 @@ function createMcpServer(): Server {
 
         case 'update_history': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
-          const rawNodeId = String(args.node_id);
           const filePath = String(args.file_path);
-          const codeSnapshot = String(args.code_snapshot);
-          const reasoning = args.reasoning as any;
-
           const db = getDatabase(devmindPath);
-          const repoRelPath = db.toRepoRelativePath(filePath);
-          const prefix = `${repoRelPath}#`;
-          const nodeId = rawNodeId.includes('#') ? rawNodeId : `${prefix}${rawNodeId}`;
 
-          let nodeName = args.name ? String(args.name) : undefined;
-          let nodeType = args.type ? String(args.type) : undefined;
-          const signature = args.signature ? String(args.signature) : undefined;
-          const sessionId = args.session_id ? String(args.session_id) : undefined;
-
-          // Infer name and type if not provided
-          if (!nodeName) {
-            nodeName = rawNodeId.includes('.') ? rawNodeId.split('.').pop()! : rawNodeId;
-          }
-          if (!nodeType) {
-            nodeType = rawNodeId.includes('.') ? 'method' : 'function';
-          }
-
-          // 1. Ensure node exists (Upsert)
-          db.upsertNode({
-            id: nodeId,
-            name: nodeName,
-            type: nodeType,
+          // Single-shot path: stage one entry and commit it immediately, so a lone edit still
+          // gets its node, history, AND outgoing edges resolved via the shared commit logic.
+          const entry: StagedEntry = {
+            node_id: String(args.node_id),
             file_path: filePath,
-            signature: signature || null
-          });
+            code_snapshot: String(args.code_snapshot),
+            reasoning: args.reasoning as any,
+            name: args.name ? String(args.name) : undefined,
+            type: args.type ? String(args.type) : undefined,
+            signature: args.signature ? String(args.signature) : undefined,
+            session_id: args.session_id ? String(args.session_id) : undefined
+          };
+          const summary = commitStagedChanges(db, devmindPath, [entry]);
+          const nodeId = entry.node_id.includes('#') ? entry.node_id : `${db.toRepoRelativePath(filePath)}#${entry.node_id}`;
 
-          // 2. Update history with 1-hour session boundary rule
-          const historyEntry = db.updateHistory({
-            node_id: nodeId,
-            code_snapshot: codeSnapshot,
-            reasoning,
-            session_id: sessionId
-          });
           return {
             content: [
               {
@@ -675,14 +571,10 @@ function createMcpServer(): Server {
                 text: JSON.stringify(
                   {
                     success: true,
-                    message: 'History updated successfully',
-                    node: { id: nodeId, name: nodeName, type: nodeType },
-                    history_entry: {
-                      id: historyEntry.id,
-                      session_id: historyEntry.session_id,
-                      created_at: historyEntry.created_at,
-                      updated_at: historyEntry.updated_at
-                    }
+                    message: 'History updated and connections resolved.',
+                    node: { id: nodeId },
+                    edges_added: summary.edges_added,
+                    missing_nodes_filled: summary.missing_filled
                   },
                   null,
                   2
@@ -709,37 +601,30 @@ function createMcpServer(): Server {
             content: [{
               type: 'text',
               text: JSON.stringify({
-                message: 'Indexing session started. Perform indexing in two passes: Phase 1 (call add_node + update_history for all entities) and Phase 2 (call add_connection to link entities once all nodes exist). Call index_checkpoint every 10 files/nodes.',
+                message: 'Indexing session started. Extract nodes with stage_change (one call per entity), then call commit_changes to write them all and resolve connections automatically via AST. Call index_checkpoint every 10 files.',
                 scratchpad: pad,
                 repos: repoSummaries,
                 total_files,
                 instructions: [
                   '⚠️⚠️⚠️  CRITICAL INSTRUCTION FOR THE INDEXING AGENT — MUST READ ⚠️⚠️⚠️ ',
-                  'YOU MUST EXPLICITLY CALL THE "add_node", "update_history" AND "add_connection" MCP TOOLS FOR EVERY NODE/CONNECTION YOU EXTRACT.',
+                  'YOU MUST EXPLICITLY CALL THE "stage_change" MCP TOOL FOR EVERY ENTITY YOU EXTRACT, THEN "commit_changes" TO WRITE THEM.',
                   'DO NOT JUST PRINT THE RESULTS AS TEXT IN THE CHAT WINDOW. PRINTING RESULTS WITHOUT CALLING THE MCP TOOLS DOES NOT WRITE THEM TO THE DATABASE AND MAKES THE ENTIRE INDEXING RUN A WASTE OF TIME AND TOKENS.',
                   'NEVER WRITE OR EXECUTE EXTERNAL SCRIPTS (like Python, Node.js, Bash, etc.) to automate or lazy load indexing. You must read files and call the MCP tools step-by-step natively in the chat. This ensures progress is tracked in the SQLite scratchpad database and can be resumed/continued in subsequent chats if context limits are hit.',
                   'ONCE YOU START INDEXING, DO NOT STOP or pause to ask for confirmation between checkpoints. Keep executing and indexing files continuously until the codebase is fully indexed or your context token limit is reached.',
                   'IF YOU ENCOUNTER CONTEXT RESETS, RESUME WORK BY CALLING "index_continue" AND CONTINUOUSLY COMMIT PROGRESS BY CALLING "index_checkpoint" EVERY 10 FILES.',
                   '',
                   '📋 CODE EXCLUSION & PRECISION RULES:',
-                  '1. EXCLUDE Language Globals / Built-ins: Do NOT call add_node/add_connection for Promise, Map, Set, JSON, console, Error, Object, Array, RegExp, Date, Math, etc.',
-                  '2. EXCLUDE Primitive/Native Types: Do NOT call add_node/add_connection for string, number, boolean, any, void, unknown, never, null, undefined, dict, list, etc.',
-                  '3. EXCLUDE External / Third-party Modules: Do NOT call add_node/add_connection for lodash, express, react, @nestjs/common, etc.',
-                  '4. INTERNAL ENTITIES ONLY: Only create nodes and connections for constructs defined inside this codebase.',
+                  '1. EXCLUDE Language Globals / Built-ins: Do NOT stage nodes for Promise, Map, Set, JSON, console, Error, Object, Array, RegExp, Date, Math, etc.',
+                  '2. EXCLUDE Primitive/Native Types: Do NOT stage nodes for string, number, boolean, any, void, unknown, never, null, undefined, dict, list, etc.',
+                  '3. EXCLUDE External / Third-party Modules: Do NOT stage nodes for lodash, express, react, @nestjs/common, etc.',
+                  '4. INTERNAL ENTITIES ONLY: Only stage nodes for constructs defined inside this codebase.',
                   '',
-                  '📋 TWO-PHASE INDEXING PROTOCOL:',
-                  'PHASE 1: NODE & CODE EXTRACTION',
+                  '📋 STAGE → COMMIT INDEXING PROTOCOL:',
                   '1. For each file in each repo: read it, extract ALL defined nodes — functions, methods, classes, interfaces, types, DTOs, routing handlers, schemas, resolvers, etc.',
-                  '2. Call add_node for every entity found, selecting the most specific taxonomy type.',
-                  '3. Call update_history for every entity found to save its raw source code snapshot.',
-                  '4. Call index_checkpoint every 10 files to save progress.',
-                  '',
-                  'PHASE 2: CONNECTION RESOLUTION (LINKING)',
-                  '1. Once all files have been indexed in Phase 1, get the list of all nodes using list_nodes.',
-                  '2. Iterate through all nodes. For each node, review its code snapshot and identify which other active codebase nodes it calls/references.',
-                  '3. Call add_connection (source_node_id, target_node_id) to link them.',
-                  '4. Call index_checkpoint every 10 nodes to save progress.',
-                  '5. When all connections have been linked, call index_complete.',
+                  '2. Call stage_change for EVERY entity found — pass its node_id, file_path, code_snapshot, reasoning, and the most specific taxonomy type. You do NOT need to figure out connections; commit_changes resolves them from the code via AST.',
+                  '3. Call index_checkpoint every 10 files to save progress.',
+                  '4. Every ~50 entities (or at the end of a repo), call commit_changes to flush the staged buffer — it creates all nodes, writes all history, and resolves all connections (including into already-committed nodes) in one pass. Committing in batches keeps the buffer small.',
+                  '5. When the whole codebase is staged and committed, call index_complete.',
                   '6. AFTER index_complete, CALL "recheck_graph" to automatically prune any spurious, built-in, or orphaned nodes and ensure high graph precision.'
                 ]
               }, null, 2)
@@ -824,6 +709,58 @@ function createMcpServer(): Server {
           };
         }
 
+        case 'stage_change': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const entry: StagedEntry = {
+            node_id: String(args.node_id),
+            file_path: String(args.file_path),
+            code_snapshot: String(args.code_snapshot),
+            reasoning: args.reasoning as any,
+            name: args.name ? String(args.name) : undefined,
+            type: args.type ? String(args.type) : undefined,
+            signature: args.signature ? String(args.signature) : undefined,
+            session_id: args.session_id ? String(args.session_id) : undefined
+          };
+          const pendingCount = stageEntry(devmindPath, entry);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                staged: true,
+                node_id: entry.node_id,
+                pending_count: pendingCount,
+                reminder: 'Call commit_changes once you have staged every touched file, or nothing is written to the graph.'
+              })
+            }]
+          };
+        }
+
+        case 'commit_changes': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const entries = readStaged(devmindPath);
+          if (entries.length === 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ committed: false, message: 'Nothing staged. Call stage_change first.' }) }]
+            };
+          }
+          const summary = commitStagedChanges(db, devmindPath, entries);
+          clearStaged(devmindPath);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                committed: true,
+                message: `✅ Committed ${summary.nodes} node(s), ${summary.history_entries} history entr(ies), ${summary.edges_added} connection(s) resolved` +
+                  (summary.missing_filled > 0 ? `, ${summary.missing_filled} missing node(s) auto-created.` : '.'),
+                ...summary
+              }, null, 2)
+            }]
+          };
+        }
+
+        // ── Deprecated write handlers: NOT advertised in ListTools (superseded by
+        //    stage_change/commit_changes), but retained so any direct/legacy call still works. ──
         case 'add_node': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
           const rawNodeId = String(args.node_id);
