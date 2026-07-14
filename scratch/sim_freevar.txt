@@ -1,7 +1,0 @@
-=== harrir-express-backend  (1314 nodes) ===
-  OLD (live):  total 3507  avg 2.7/node  max 87
-  NEW (fixed): total 3483  avg 2.7/node  max 87
-=== harrir-mini-app  (1139 nodes) ===
-  OLD (live):  total 1496  avg 1.3/node  max 13
-  NEW (fixed): total 1487  avg 1.3/node  max 13
-DONE
