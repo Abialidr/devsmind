@@ -21,6 +21,25 @@ import { stageEntry, readStaged, clearStaged, commitStagedChanges, StagedEntry }
 // â”€â”€â”€ Port: devsâ†’D(4)E(5)=45 + mindâ†’M(13)=13 â†’ 4513 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export const DEVSMIND_PORT = 4513;
 
+/**
+ * Sent to every MCP client at connection time via the protocol's `instructions`
+ * field (part of the initialize handshake) — the single source of truth for the
+ * cross-cutting workflow contract, independent of whatever the user did or didn't
+ * paste into a `devsmind rule` output. Keep this crisp: unlike a tool's own
+ * `description` (resent every call), this is easy for a long session to lose
+ * track of too, so it should carry only what's genuinely cross-cutting.
+ */
+export const DEVSMIND_INSTRUCTIONS = `DevsMind is this team's persistent shared code memory — not a personal tool you reach for only when asked to search something. Every teammate's AI agent, in every session, reads from the SAME graph you are about to write to. There is no "your copy."
+
+If you skip recording a change, you are not skipping a formality. You are leaving the whole team's graph stale for every other AI agent that queries this code later — tomorrow, on a different task, in a different session. And the reasoning behind your change (why it was made, what ticket drove it, what was broken before, what you tried and rejected) exists ONLY in this conversation, right now. It is not in the diff. It is not in the commit message. If it isn't captured this turn, it is gone forever — no reindex, no log, no git blame can recover it later.
+
+Non-negotiable workflow:
+1. Before any filesystem search or file read: call search_nodes first. It searches names/reasoning and automatically falls back to a full code-content search if nothing matches — one call covers both, never start with grep.
+2. To read one function/class: call get_node_code instead of opening the file. It parses live from disk, so it's cheaper and always current.
+3. Before touching any function's signature: call get_node_graph. Git shows you what changed; it never shows you what depends on it. Find out before you break something, not after.
+4. Before refactoring: call get_node_history. Git blame tells you who and when; it never tells you why. The actual decision context only exists here.
+5. After ANY code change, in the SAME turn: call stage_change once per touched entity, then commit_changes exactly once. This is the only moment this reasoning can ever be captured — never end a turn with it undone.`;
+
 // Shared node-type taxonomy description, reused by update_history and stage_change.
 const NODE_TYPE_DESCRIPTION =
   'The type of node. Be highly specific and framework-aware. Choose from the taxonomy below (or use a custom value if nothing fits).\n\n' +
@@ -112,7 +131,10 @@ function cleanup() {
 function createMcpServer(): Server {
   const server = new Server(
     { name: 'devsmind-server', version: '1.0.0' },
-    { capabilities: { tools: {} } }
+    {
+      capabilities: { tools: {} },
+      instructions: DEVSMIND_INSTRUCTIONS
+    }
   );
 
   // â”€â”€ Tool Definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
