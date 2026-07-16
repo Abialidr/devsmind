@@ -292,7 +292,7 @@ function createMcpServer(): Server {
                   requirement: { type: 'string', description: 'Ticket / issue / user request ID if applicable' },
                   previous_state: { type: 'string', description: 'What the code looked like before and why it was a problem' },
                   decision: { type: 'string', description: 'Architectural or implementation decision and why' },
-                  developer: { type: 'string', description: 'Name of the developer' },
+                  developer: { type: 'string', description: 'Name of the developer (optional — if this project has a configured developer identity from `devsmind init`, it always overrides whatever is passed here, since the agent has no reliable way to know who the human actually is)' },
                   model: { type: 'string', description: 'AI model name used' }
                 },
                 required: ['what_changed', 'why', 'goal']

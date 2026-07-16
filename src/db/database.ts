@@ -816,7 +816,17 @@ export class DevMindDatabase {
     reasoning: string | ReasoningObject;
     session_id?: string;
   }): DbHistory {
-    const { node_id, code_snapshot, reasoning } = params;
+    const { node_id, code_snapshot } = params;
+    let reasoning = params.reasoning;
+    // The calling AI has no reliable way to know who the human running this
+    // machine actually is -- it can only guess ("Claude Code", "AI Assistant",
+    // etc). Whenever this project has a configured developer identity (from
+    // .env's DEVELOPER_NAME, set by `devsmind init`), that's authoritative and
+    // always overrides whatever the agent supplied, so history is attributed
+    // to the real developer regardless of what the agent wrote in this field.
+    if (typeof reasoning === 'object' && this.context?.developer?.name) {
+      reasoning = { ...reasoning, developer: this.context.developer.name };
+    }
     const node = this.getNode(node_id);
     const resolvedId = node ? node.id : node_id;
     const formattedReasoning = formatReasoning(reasoning);
