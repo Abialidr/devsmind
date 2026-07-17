@@ -97,8 +97,12 @@ export async function handleMemory(opts: { path?: string }): Promise<void> {
         const pointerBody = `See \`${scope.file}\` in this folder for the DevsMind workflow contract — search before grep, ` +
           `\`stage_change\` + \`commit_changes\` after every code change.`;
         const pointerMerged = mergeRuleFile(pointerPath, pointerBody, 'append-section');
-        writeConfigFile(pointerPath, pointerMerged.content);
-        console.log(`✅ Pointer added to ${pointerPath.replace(/\\/g, '/')}`);
+        if (pointerMerged.error) {
+          console.error(`❌ ${pointerMerged.error}`);
+        } else {
+          writeConfigFile(pointerPath, pointerMerged.content);
+          console.log(`✅ Pointer added to ${pointerPath.replace(/\\/g, '/')}`);
+        }
       }
     }
   } catch (err) {

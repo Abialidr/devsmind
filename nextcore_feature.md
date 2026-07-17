@@ -10,7 +10,9 @@ We have categorized future enhancements into actionable phases based on implemen
 
 > **Design Constraint:** All features must operate in a **fully closed environment** — zero external services, zero vector databases, zero API costs. Everything runs locally using the existing SQLite graph.
 
-### Phase 1: Graph Health & Integrity
+### Phase 1: Graph Health & Integrity — ✅ IMPLEMENTED (v2.2.4)
+
+> Shipped as `devsmind analyze` (CLI) and `analyze_graph` (MCP tool), plus `devsmind sync --analyze` and `devsmind start --sync --analyze` for running it as a step of syncing/starting. See the README's [Command Reference](README.md#-other-cli-commands) and [MCP Tool Reference](README.md#-mcp-tool-reference) for current usage. Detections beyond this original spec were added too: dangling edges, duplicate/case-collision node ids, history missing developer attribution, empty code snapshots, and git-tracked files with zero graph nodes. The `last_analysis_at` caching optimization described below (skip re-analysis if nothing changed) was **not** implemented in v1 — correctness-first given the dataset sizes involved; every run computes fresh. The spec below is kept for historical reference.
 
 #### 1.1. Graph Health & Integrity (`analyze_graph` & `devsmind analyze`)
 *   **Goal**: Run structural analysis algorithms over the existing SQLite graph (detect circular dependencies, God entities, orphaned/abandoned nodes) and perform local, token-free cleanup (such as Git-native file rename detection, spurious node checks, and soft-delete deprecations) under a single entry point.
@@ -57,7 +59,9 @@ We have categorized future enhancements into actionable phases based on implemen
 
 ---
 
-### Phase 4: Workflow Context Vault (Feature Sessions)
+### Phase 4: Workflow Context Vault (Feature Sessions) — ✅ IMPLEMENTED (v2.3.0)
+
+> Shipped as nine `workflow_*` MCP tools plus `devsmind workflow` and `devsmind workflow-import <path>` (CLI). See the README's [MCP Tool Reference](README.md#-mcp-tool-reference) (Category 6) and [Command Reference](README.md#-other-cli-commands). Two deliberate deviations from the spec below, both to preserve the zero-external-API-cost design constraint: `workflow_sync_retroactive` takes an already-extracted `steps` array rather than raw `transcript_text` (the calling agent already has the transcript and extracts for free — DevsMind never makes its own LLM calls), and "Proactive AI Guardrails" is implemented as a `workflow_list` tool plus rule/instructions guidance telling the agent to check and ask, not server-side semantic matching. `workflow_import` (not in the original spec) was added afterward — it reads existing hand-written flow docs directly into the vault as paused workflows. The spec below is kept for historical reference.
 
 #### 4. Persistent Feature Memory & Milestones
 *   **Goal**: Provide long-term institutional memory for the AI across multiple vibe coding sessions spanning days or weeks.
@@ -93,10 +97,10 @@ We have categorized future enhancements into actionable phases based on implemen
 
 | Feature | Developer Value | AI Agent Value | Complexity to Build | Priority |
 | :--- | :--- | :--- | :--- | :--- |
-| **Graph Health & Integrity** | 🔥 High — exposes architectural rot early | 🔥 High — cleaner reasoning context | Low | **Critical** |
+| **Graph Health & Integrity** | [DONE] Shipped as `devsmind analyze` / `analyze_graph` in v2.2.4 | [DONE] | - | - |
 | **Cross-Repo Trace Mapping** | 🔥 Very High — full system visibility across services | 🔥 Very High — eliminates hallucinated API guesses | Medium | **High** |
 | **Enhanced Recent Changes** | [DONE] Surfaced downstream warnings in get_recent_changes | [DONE] | - | - |
-| **Workflow Context Vault** | 🔥 Very High — true project continuity | 🔥 Very High — solves context death | Medium | **Critical** |
+| **Workflow Context Vault** | [DONE] Shipped as `workflow_*` MCP tools + `devsmind workflow`/`workflow-import` in v2.3.0 | [DONE] | - | - |
 | **Token & Cost Telemetry** | ✅ Medium — cost visibility and reporting | 🔥 High — identifies token leaks/bloat | Low | **High** |
 
 ---

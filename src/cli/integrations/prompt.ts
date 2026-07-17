@@ -58,13 +58,15 @@ export async function pickTarget(): Promise<IdeTarget> {
     for (const t of clis) choices.push({ title: `  ${t.label}`, value: t });
   }
 
-  // Skip the non-selectable header rows if one is chosen.
-  const picked = await selectPrompt('What are you working in?', choices, 1);
-  if (!picked) {
-    // Header row selected — re-ask.
-    return pickTarget();
+  // Skip the non-selectable header rows if one is chosen. Bounded like pickDirectory's
+  // loop — a non-interactive/piped stdin that keeps returning the header value would
+  // otherwise recurse without limit.
+  let guard = 0;
+  while (guard++ < 5000) {
+    const picked = await selectPrompt('What are you working in?', choices, 1);
+    if (picked) return picked;
   }
-  return picked;
+  throw new CancelledError();
 }
 
 export async function pickTransport(target: IdeTarget): Promise<Transport> {
@@ -207,6 +209,8 @@ export interface MergeResult {
   existed: boolean;
   /** Human-readable preview of what will be written (for confirmation). */
   preview: string;
+  /** Set when the file is corrupted in a way that makes a safe merge impossible — callers must not write `content` when this is set. */
+  error?: string;
 }
 
 /**
@@ -361,8 +365,20 @@ export function mergeRuleFile(
   const startIdx = existing.indexOf(RULE_START);
   const endIdx = existing.indexOf(RULE_END);
 
+  // A start marker with no matching end (or an end before start) means the block was
+  // hand-edited or a prior write was interrupted — appending a fresh block on top would
+  // leave the orphaned marker behind forever and the file would grow every run.
+  if (startIdx !== -1 && (endIdx === -1 || endIdx < startIdx)) {
+    return {
+      content: existing,
+      existed,
+      preview: '',
+      error: `Found "${RULE_START}" without a matching "${RULE_END}" in ${filePath} — the DevsMind block looks corrupted (hand-edited or an interrupted write). Remove both markers manually and re-run this command.`
+    };
+  }
+
   let content: string;
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+  if (startIdx !== -1 && endIdx !== -1) {
     content = existing.slice(0, startIdx) + block + existing.slice(endIdx + RULE_END.length);
   } else {
     const base = existing.replace(/\n*$/, '');

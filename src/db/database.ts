@@ -3,8 +3,8 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
-import { INIT_SCHEMA_SQL, DbNode, DbHistory, DbConnection } from './schema';
-import { loadProjectContext, resolveRepoPath, ProjectContext } from '../utils/config';
+import { INIT_SCHEMA_SQL, DbNode, DbHistory, DbConnection, DbWorkflow, DbWorkflowStep, DbWorkflowArtifact } from './schema';
+import { loadProjectContext, resolveRepoPath, ProjectContext, canonicalizePath } from '../utils/config';
 import { parseNodeId, extractNodeFromFile } from '../utils/ast';
 
 function compressText(text: string): Buffer {
@@ -127,6 +127,10 @@ export class DevMindDatabase {
     `);
   }
 
+  getContext(): ProjectContext | null {
+    return this.context;
+  }
+
   getSystemMeta(key: string): string | null {
     try {
       const stmt = this.db.prepare('SELECT value FROM system_meta WHERE key = ?');
@@ -200,6 +204,9 @@ export class DevMindDatabase {
       }
       fs.mkdirSync(p, { recursive: true });
     }
+    // NOTE: 'workflows/' is intentionally NOT wiped — workflow data is long-lived
+    // cross-session state that survives a node/history reindex. It will be
+    // restored from workflows/*/workflow.json on the next syncFromDisk().
 
     this.vacuum();
   }
@@ -253,11 +260,12 @@ export class DevMindDatabase {
   // --- Node Operations ---
 
   upsertNode(node: { id: string; type: string; name: string; file_path: string; signature?: string | null }) {
+    const canonicalFp = canonicalizePath(node.file_path);
     const existing = this.getNode(node.id);
     if (existing) {
       let finalPath = existing.file_path;
       const paths = existing.file_path.split(',').map(p => p.trim()).filter(Boolean);
-      const incoming = node.file_path.trim();
+      const incoming = canonicalFp.trim();
       if (!paths.includes(incoming)) {
         paths.push(incoming);
         finalPath = paths.join(', ');
@@ -278,9 +286,9 @@ export class DevMindDatabase {
         INSERT INTO nodes (id, type, name, file_path, signature)
         VALUES (?, ?, ?, ?, ?)
       `);
-      stmt.run(node.id, node.type, node.name, node.file_path, node.signature || null);
+      stmt.run(node.id, node.type, node.name, canonicalFp, node.signature || null);
     }
-    this.writeGraphToDisk(node.file_path);
+    this.writeGraphToDisk(canonicalFp);
   }
 
   getNode(id: string): DbNode | null {
@@ -289,8 +297,8 @@ export class DevMindDatabase {
     if (direct) return direct;
 
     if (!id.includes('#')) {
-      const suffixStmt = this.db.prepare('SELECT * FROM nodes WHERE id LIKE ? AND deprecated = 0');
-      const matches = suffixStmt.all(`%#${id}`) as DbNode[];
+      const suffixStmt = this.db.prepare("SELECT * FROM nodes WHERE id LIKE ? ESCAPE '\\' AND deprecated = 0");
+      const matches = suffixStmt.all(`%#${this.likeEscape(id)}`) as DbNode[];
       if (matches.length === 1) {
         return matches[0];
       }
@@ -339,23 +347,25 @@ export class DevMindDatabase {
     }
   }
 
-  renameNode(oldId: string, newId: string, newName?: string) {
+  /** `newFilePath`: pass when the rename is a file move (analyze's rename migration), leave undefined for a pure symbol-id rename where the file itself is unchanged. */
+  renameNode(oldId: string, newId: string, newName?: string, newFilePath?: string) {
     const node = this.getNode(oldId);
     if (!node) {
       throw new Error(`Node not found: ${oldId}`);
     }
 
     const name = newName || (node.name === oldId ? newId : node.name);
+    const filePath = newFilePath || node.file_path;
 
     this.db.pragma('foreign_keys = OFF');
 
     try {
       const runTx = this.db.transaction(() => {
         const insertStmt = this.db.prepare(`
-          INSERT INTO nodes (id, type, name, file_path, signature, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
+          INSERT INTO nodes (id, type, name, file_path, signature, created_at, deprecated)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
         `);
-        insertStmt.run(newId, node.type, name, node.file_path, node.signature, node.created_at);
+        insertStmt.run(newId, node.type, name, filePath, node.signature, node.created_at, node.deprecated ? 1 : 0);
 
         const updateSourceStmt = this.db.prepare(`
           UPDATE node_connections SET source_node_id = ? WHERE source_node_id = ?
@@ -378,7 +388,12 @@ export class DevMindDatabase {
 
       runTx();
       if (node.file_path) {
+        // Rewrite the OLD file's graph JSON too when the file itself moved, so the
+        // stale node entry doesn't linger under the old path's JSON on disk.
         this.writeGraphToDisk(node.file_path);
+      }
+      if (filePath && filePath !== node.file_path) {
+        this.writeGraphToDisk(filePath);
       }
 
       // Edges pointing INTO the renamed node live in the SOURCE nodes' files' graph JSONs
@@ -392,7 +407,7 @@ export class DevMindDatabase {
       // longer exists in the DB) and re-insert it right back, undoing the rename.
       const historyIds = this.db.prepare('SELECT id FROM history WHERE node_id = ?').all(newId) as { id: string }[];
       for (const row of historyIds) {
-        this.patchHistoryDiskIdentity(row.id, newId, name, node.type, node.file_path, node.signature);
+        this.patchHistoryDiskIdentity(row.id, newId, name, node.type, filePath, node.signature);
       }
     } finally {
       this.db.pragma('foreign_keys = ON');
@@ -841,22 +856,33 @@ export class DevMindDatabase {
       const nowTime = new Date(nowStr).getTime();
       const diffMs = nowTime - lastUpdate;
 
-      // If updated < 1 hour ago, update same record
+      // If updated < 1 hour ago, update the same record IN PLACE (no new row — this is what
+      // keeps db/graph/history from bloating with one entry per commit during an active editing
+      // session). code_snapshot is always the latest state (git already owns version history for
+      // code). reasoning is APPENDED, not overwritten — an earlier commit's "why" in this same
+      // session is still real and still worth keeping; losing it silently is worse than a few
+      // extra lines in one file. This also keeps any workflow step whose history_ids point at
+      // this row valid: it never loses what it originally linked to, only gains more below it.
       if (diffMs < 3600000) {
+        const previousReasoning = typeof latest.reasoning === 'string' ? latest.reasoning : '';
+        const mergedReasoning = previousReasoning.trim().length > 0
+          ? `${previousReasoning}\n\n── Update @ ${nowStr} ──\n${formattedReasoning}`
+          : formattedReasoning;
+
         const updateStmt = this.db.prepare(`
           UPDATE history
           SET code_snapshot = '', reasoning = ?, updated_at = ?
           WHERE id = ?
         `);
-        updateStmt.run(formattedReasoning, nowStr, latest.id);
-        
+        updateStmt.run(mergedReasoning, nowStr, latest.id);
+
         // Write/Update on disk
-        this.writeHistoryToDisk(latest.id, resolvedId, latest.session_id, latest.created_at, nowStr, code_snapshot, formattedReasoning);
+        this.writeHistoryToDisk(latest.id, resolvedId, latest.session_id, latest.created_at, nowStr, code_snapshot, mergedReasoning);
 
         return {
           ...latest,
           code_snapshot,
-          reasoning: formattedReasoning,
+          reasoning: mergedReasoning,
           updated_at: nowStr
         };
       }
@@ -980,11 +1006,11 @@ export class DevMindDatabase {
       SELECT h.node_id, n.name as node_name, h.updated_at, h.reasoning
       FROM history h
       JOIN nodes n ON h.node_id = n.id
-      WHERE h.reasoning LIKE ?
+      WHERE h.reasoning LIKE ? ESCAPE '\\'
       ORDER BY h.updated_at DESC
       LIMIT ?
     `);
-    const query = `%Developer: %${developer}%`;
+    const query = `%Developer: %${this.likeEscape(developer)}%`;
     return stmt.all(query, limit) as { node_id: string; node_name: string; updated_at: string; reasoning: string }[];
   }
 
@@ -993,10 +1019,10 @@ export class DevMindDatabase {
       SELECT h.node_id, n.name as node_name, h.updated_at, h.reasoning
       FROM history h
       JOIN nodes n ON h.node_id = n.id
-      WHERE h.reasoning LIKE ?
+      WHERE h.reasoning LIKE ? ESCAPE '\\'
       ORDER BY h.updated_at DESC
     `);
-    const query = `%Requirement: %${requirementId}%`;
+    const query = `%Requirement: %${this.likeEscape(requirementId)}%`;
     return stmt.all(query) as { node_id: string; node_name: string; updated_at: string; reasoning: string }[];
   }
 
@@ -1005,10 +1031,10 @@ export class DevMindDatabase {
       SELECT h.node_id, n.name as node_name, h.updated_at, h.reasoning
       FROM history h
       JOIN nodes n ON h.node_id = n.id
-      WHERE h.reasoning LIKE ?
+      WHERE h.reasoning LIKE ? ESCAPE '\\'
       ORDER BY h.updated_at DESC
     `);
-    const wildcard = `%Decision: %${query}%`;
+    const wildcard = `%Decision: %${this.likeEscape(query)}%`;
     return stmt.all(wildcard) as { node_id: string; node_name: string; updated_at: string; reasoning: string }[];
   }
 
@@ -1099,7 +1125,8 @@ export class DevMindDatabase {
   getOrphanedNodes(): DbNode[] {
     const stmt = this.db.prepare(`
       SELECT * FROM nodes
-      WHERE id NOT IN (SELECT DISTINCT source_node_id FROM node_connections)
+      WHERE deprecated = 0
+        AND id NOT IN (SELECT DISTINCT source_node_id FROM node_connections)
         AND id NOT IN (SELECT DISTINCT target_node_id FROM node_connections)
     `);
     return stmt.all() as DbNode[];
@@ -1143,54 +1170,511 @@ export class DevMindDatabase {
     return rows.map(row => this.populateHistoryFromDisk(row));
   }
 
-  pruneSpuriousNodes(workspaceRoot: string): { prunedCount: number; prunedNodes: string[] } {
-    const spuriousNames = new Set([
-      'promise', 'map', 'set', 'json', 'console', 'error', 'object', 'function', 'array', 'string', 'number', 'boolean', 'regexp', 'date', 'math',
-      'any', 'void', 'unknown', 'never', 'null', 'undefined', 'dict', 'list',
-      'data', 'useeffect', 'val', 'temp', 'result', 'item', 'key', 'value', 'err', 'req', 'res', 'args', 'params', 'response', 'request'
+  // ─── `devsmind analyze` read-only health checks ────────────────────────────
+  // All pure queries/graph traversal, no mutation, no LLM calls.
+
+  /** Nodes whose total (in + out) connection degree meets/exceeds `threshold` — architectural bottleneck candidates. */
+  getGodEntities(threshold = 15): { id: string; name: string; file_path: string; degree: number }[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM (
+        SELECT n.id, n.name, n.file_path, (
+          (SELECT COUNT(*) FROM node_connections c WHERE c.source_node_id = n.id) +
+          (SELECT COUNT(*) FROM node_connections c WHERE c.target_node_id = n.id)
+        ) AS degree
+        FROM nodes n
+        WHERE n.deprecated = 0
+      )
+      WHERE degree >= ?
+      ORDER BY degree DESC
+    `);
+    return stmt.all(threshold) as { id: string; name: string; file_path: string; degree: number }[];
+  }
+
+  /** DFS cycle detection over the connection graph, capped at `maxCycles` reported paths. */
+  getCircularDependencies(maxCycles = 50): string[][] {
+    const edges = this.getAllConnections();
+    const adjacency = new Map<string, string[]>();
+    for (const e of edges) {
+      if (!adjacency.has(e.source_node_id)) adjacency.set(e.source_node_id, []);
+      adjacency.get(e.source_node_id)!.push(e.target_node_id);
+    }
+
+    const cycles: string[][] = [];
+    const visited = new Set<string>();
+    const stack: string[] = [];
+    const onStack = new Set<string>();
+
+    const dfs = (node: string) => {
+      if (cycles.length >= maxCycles) return;
+      if (onStack.has(node)) {
+        const start = stack.indexOf(node);
+        cycles.push([...stack.slice(start), node]);
+        return;
+      }
+      if (visited.has(node)) return;
+      visited.add(node);
+      stack.push(node);
+      onStack.add(node);
+      for (const next of adjacency.get(node) || []) {
+        if (cycles.length >= maxCycles) break;
+        dfs(next);
+      }
+      stack.pop();
+      onStack.delete(node);
+    };
+
+    for (const node of adjacency.keys()) {
+      if (cycles.length >= maxCycles) break;
+      if (!visited.has(node)) dfs(node);
+    }
+    return cycles;
+  }
+
+  /** node_connections rows whose source or target no longer exists in `nodes` (broken by a non-transactional delete, or a sync race). */
+  getDanglingEdges(): DbConnection[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM node_connections
+      WHERE source_node_id NOT IN (SELECT id FROM nodes)
+         OR target_node_id NOT IN (SELECT id FROM nodes)
+    `);
+    return stmt.all() as DbConnection[];
+  }
+
+  /** Deletes a single dangling `node_connections` row. The edge itself is invalid data — no history/graph JSON to rewrite. */
+  deleteDanglingEdge(sourceId: string, targetId: string) {
+    this.db.prepare('DELETE FROM node_connections WHERE source_node_id = ? AND target_node_id = ?').run(sourceId, targetId);
+  }
+
+  /** Node ids that differ only by case — a real collision risk on Windows's case-insensitive filesystem. */
+  getDuplicateNodeIds(): { lowerId: string; ids: string[] }[] {
+    const stmt = this.db.prepare(`
+      SELECT LOWER(id) AS lower_id, GROUP_CONCAT(id, '|') AS ids
+      FROM nodes
+      WHERE deprecated = 0
+      GROUP BY lower_id
+      HAVING COUNT(*) > 1
+    `);
+    const rows = stmt.all() as { lower_id: string; ids: string }[];
+    return rows.map(r => ({ lowerId: r.lower_id, ids: r.ids.split('|') }));
+  }
+
+  /** History rows whose flattened `reasoning` text has no non-empty `Developer:` line — can't be attributed to anyone. */
+  getHistoryMissingDeveloper(): { id: string; node_id: string; updated_at: string }[] {
+    const stmt = this.db.prepare('SELECT id, node_id, updated_at, reasoning FROM history');
+    const rows = stmt.all() as { id: string; node_id: string; updated_at: string; reasoning: string }[];
+    return rows
+      .filter(r => {
+        // [ \t]* (not \s*) so the match can't swallow the newline and bleed into the
+        // next "Model:" line when Developer is blank, which would wrongly capture
+        // "Model: <value>" as if it were the developer's name.
+        const match = /Developer:[ \t]*([^\n]*)/i.exec(r.reasoning || '');
+        return !match || !match[1].trim();
+      })
+      .map(({ id, node_id, updated_at }) => ({ id, node_id, updated_at }));
+  }
+
+  /**
+   * History rows with a blank code snapshot — usually a silent AST extraction failure.
+   * The `history.code_snapshot` DB column is always written as `''` (the real content
+   * lives only in the per-row JSON on disk, see `populateHistoryFromDisk`), so this
+   * must read through the populated rows rather than querying the column directly.
+   */
+  getEmptyCodeSnapshots(): { id: string; node_id: string; updated_at: string }[] {
+    return this.getAllHistory()
+      .filter(h => !h.code_snapshot || h.code_snapshot.trim() === '')
+      .map(({ id, node_id, updated_at }) => ({ id, node_id, updated_at }));
+  }
+
+  // ─── Workflow Context Vault ─────────────────────────────────────────────
+  // Persistent, cross-session feature memory. Steps link to existing `history`
+  // rows rather than duplicating code/reasoning; artifacts are plain files on
+  // disk under `.devmind/workflows/<id>/`, with only the path stored in the DB.
+
+  private workflowsDir(): string {
+    return path.join(path.dirname(this.dbPath), 'workflows');
+  }
+
+  /** Serializes the workflow + its steps + artifact index to disk so teammates can sync it via git. */
+  private writeWorkflowToDisk(workflowId: string): void {
+    try {
+      const workflow = this.db.prepare('SELECT * FROM workflows WHERE id = ?').get(workflowId) as DbWorkflow | undefined;
+      if (!workflow) return;
+      const steps = this.db.prepare('SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY step_index ASC').all(workflowId) as DbWorkflowStep[];
+      const artifacts = this.db.prepare('SELECT * FROM workflow_artifacts WHERE workflow_id = ? ORDER BY created_at ASC').all(workflowId) as DbWorkflowArtifact[];
+      const activeId = this.getSystemMeta('active_workflow_id');
+      const data = {
+        id: workflow.id,
+        name: workflow.name,
+        description: workflow.description,
+        status: workflow.status,
+        created_at: workflow.created_at,
+        updated_at: workflow.updated_at,
+        is_active: activeId === workflowId,
+        steps: steps.map(s => ({
+          id: s.id,
+          step_index: s.step_index,
+          summary: s.summary,
+          pending_tasks: s.pending_tasks,
+          history_ids: s.history_ids,
+          session_id: s.session_id,
+          created_at: s.created_at
+        })),
+        artifact_index: artifacts.map(a => ({
+          id: a.id,
+          step_id: a.step_id,
+          type: a.type,
+          source_name: a.source_name,
+          file_path: a.file_path,
+          created_at: a.created_at
+        }))
+      };
+      const dir = path.join(this.workflowsDir(), workflowId);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'workflow.json'), JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('⚠️ DevsMind: Failed to write workflow JSON to disk:', err);
+    }
+  }
+
+  createWorkflow(name: string, description: string): DbWorkflow {
+    const id = `wf_${crypto.randomUUID()}`;
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO workflows (id, name, description, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'active', ?, ?)
+    `).run(id, name, description, now, now);
+    this.setSystemMeta('active_workflow_id', id);
+    this.writeWorkflowToDisk(id);
+    return { id, name, description, status: 'active', created_at: now, updated_at: now };
+  }
+
+  getWorkflow(id: string): DbWorkflow | null {
+    const row = this.db.prepare('SELECT * FROM workflows WHERE id = ?').get(id) as DbWorkflow | undefined;
+    return row || null;
+  }
+
+  getActiveWorkflow(): DbWorkflow | null {
+    const id = this.getSystemMeta('active_workflow_id');
+    return id ? this.getWorkflow(id) : null;
+  }
+
+  listWorkflows(status?: 'active' | 'paused' | 'completed'): DbWorkflow[] {
+    if (status) {
+      return this.db.prepare('SELECT * FROM workflows WHERE status = ? ORDER BY updated_at DESC').all(status) as DbWorkflow[];
+    }
+    return this.db.prepare('SELECT * FROM workflows ORDER BY updated_at DESC').all() as DbWorkflow[];
+  }
+
+  /** Pauses the currently active workflow (if any) and clears the active pointer. */
+  pauseWorkflow(): DbWorkflow | null {
+    const active = this.getActiveWorkflow();
+    if (!active) return null;
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE workflows SET status = 'paused', updated_at = ? WHERE id = ?`).run(now, active.id);
+    this.setSystemMeta('active_workflow_id', '');
+    this.writeWorkflowToDisk(active.id);
+    return { ...active, status: 'paused', updated_at: now };
+  }
+
+  /** Resumes `id`, auto-pausing whatever was previously active (only one workflow is active at a time). */
+  resumeWorkflow(id: string): DbWorkflow {
+    const workflow = this.getWorkflow(id);
+    if (!workflow) throw new Error(`Workflow not found: ${id}`);
+    const currentActive = this.getActiveWorkflow();
+    if (currentActive && currentActive.id !== id) this.pauseWorkflow();
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE workflows SET status = 'active', updated_at = ? WHERE id = ?`).run(now, id);
+    this.setSystemMeta('active_workflow_id', id);
+    this.writeWorkflowToDisk(id);
+    return { ...workflow, status: 'active', updated_at: now };
+  }
+
+  completeWorkflow(id: string): DbWorkflow {
+    const workflow = this.getWorkflow(id);
+    if (!workflow) throw new Error(`Workflow not found: ${id}`);
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE workflows SET status = 'completed', updated_at = ? WHERE id = ?`).run(now, id);
+    if (this.getSystemMeta('active_workflow_id') === id) this.setSystemMeta('active_workflow_id', '');
+    this.writeWorkflowToDisk(id);
+    return { ...workflow, status: 'completed', updated_at: now };
+  }
+
+  addWorkflowStep(workflowId: string, opts: { summary: string; pendingTasks?: string; historyIds?: string[]; sessionId?: string }): DbWorkflowStep {
+    if (!this.getWorkflow(workflowId)) throw new Error(`Workflow not found: ${workflowId}`);
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const nextIndex = ((this.db.prepare('SELECT MAX(step_index) AS m FROM workflow_steps WHERE workflow_id = ?').get(workflowId) as { m: number | null }).m ?? 0) + 1;
+    const historyIdsJson = opts.historyIds && opts.historyIds.length ? JSON.stringify(opts.historyIds) : null;
+    this.db.prepare(`
+      INSERT INTO workflow_steps (id, workflow_id, step_index, summary, pending_tasks, history_ids, session_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, workflowId, nextIndex, opts.summary, opts.pendingTasks || null, historyIdsJson, opts.sessionId || null, now);
+    this.db.prepare(`UPDATE workflows SET updated_at = ? WHERE id = ?`).run(now, workflowId);
+    this.writeWorkflowToDisk(workflowId);
+    return { id, workflow_id: workflowId, step_index: nextIndex, summary: opts.summary, pending_tasks: opts.pendingTasks || null, history_ids: historyIdsJson, session_id: opts.sessionId || null, created_at: now };
+  }
+
+  /** Writes `content` to `.devmind/workflows/<workflowId>/<artifactId>_<sourceName>` and records the DB row. */
+  addWorkflowArtifact(workflowId: string, opts: { stepId?: string; type: string; sourceName: string; content: string }): DbWorkflowArtifact {
+    if (!this.getWorkflow(workflowId)) throw new Error(`Workflow not found: ${workflowId}`);
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const safeName = opts.sourceName.replace(/[^a-zA-Z0-9._-]/g, '_') || 'artifact.md';
+    const dir = path.join(this.workflowsDir(), workflowId);
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${id}_${safeName}`);
+    fs.writeFileSync(filePath, opts.content, 'utf-8');
+    this.db.prepare(`
+      INSERT INTO workflow_artifacts (id, workflow_id, step_id, type, source_name, file_path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, workflowId, opts.stepId || null, opts.type, opts.sourceName, filePath, now);
+    this.db.prepare(`UPDATE workflows SET updated_at = ? WHERE id = ?`).run(now, workflowId);
+    this.writeWorkflowToDisk(workflowId);
+    return { id, workflow_id: workflowId, step_id: opts.stepId || null, type: opts.type, source_name: opts.sourceName, file_path: filePath, created_at: now };
+  }
+
+  getWorkflowContext(id: string, opts?: { includeArtifactContent?: boolean }): { workflow: DbWorkflow; steps: DbWorkflowStep[]; artifacts: (DbWorkflowArtifact & { content?: string })[] } {
+    const workflow = this.getWorkflow(id);
+    if (!workflow) throw new Error(`Workflow not found: ${id}`);
+    const steps = this.db.prepare('SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY step_index ASC').all(id) as DbWorkflowStep[];
+    const artifactRows = this.db.prepare('SELECT * FROM workflow_artifacts WHERE workflow_id = ? ORDER BY created_at ASC').all(id) as DbWorkflowArtifact[];
+    const artifacts: (DbWorkflowArtifact & { content?: string })[] = artifactRows.map(a => {
+      if (!opts?.includeArtifactContent) return a;
+      try {
+        const content = fs.existsSync(a.file_path) ? fs.readFileSync(a.file_path, 'utf-8') : undefined;
+        return { ...a, content };
+      } catch {
+        return a;
+      }
+    });
+    return { workflow, steps, artifacts };
+  }
+
+  /**
+   * Returns steps for a workflow with optional pagination.
+   * Use `last_n` to get only the most recent N steps (tail), or `limit`/`offset` for
+   * arbitrary pagination. Without any option, all steps are returned.
+   */
+  getWorkflowSteps(
+    workflowId: string,
+    opts?: { limit?: number; offset?: number; last_n?: number }
+  ): DbWorkflowStep[] {
+    if (!this.getWorkflow(workflowId)) throw new Error(`Workflow not found: ${workflowId}`);
+    if (opts?.last_n && opts.last_n > 0) {
+      // Fetch the last N steps by descending step_index, then reverse to chronological
+      const rows = this.db.prepare(
+        'SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY step_index DESC LIMIT ?'
+      ).all(workflowId, opts.last_n) as DbWorkflowStep[];
+      return rows.reverse();
+    }
+    if (opts?.limit) {
+      return this.db.prepare(
+        'SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY step_index ASC LIMIT ? OFFSET ?'
+      ).all(workflowId, opts.limit, opts.offset ?? 0) as DbWorkflowStep[];
+    }
+    return this.db.prepare(
+      'SELECT * FROM workflow_steps WHERE workflow_id = ? ORDER BY step_index ASC'
+    ).all(workflowId) as DbWorkflowStep[];
+  }
+
+  /**
+   * Reads a single workflow artifact's file content from disk.
+   * Accepts either an artifact_id or a source_name (first match used).
+   */
+  readWorkflowArtifact(workflowId: string, artifactId: string): { artifact: DbWorkflowArtifact; content: string } {
+    if (!this.getWorkflow(workflowId)) throw new Error(`Workflow not found: ${workflowId}`);
+    const row = this.db.prepare(
+      'SELECT * FROM workflow_artifacts WHERE workflow_id = ? AND id = ?'
+    ).get(workflowId, artifactId) as DbWorkflowArtifact | undefined;
+    if (!row) throw new Error(`Artifact not found: ${artifactId} in workflow ${workflowId}`);
+    if (!fs.existsSync(row.file_path)) throw new Error(`Artifact file missing on disk: ${row.file_path}`);
+    const content = fs.readFileSync(row.file_path, 'utf-8');
+    return { artifact: row, content };
+  }
+
+  /**
+   * Full-text keyword search across all workflows' step summaries, pending_tasks,
+   * and artifact source names. Optionally also searches artifact file content.
+   * Returns a list of matches grouped by workflow.
+   */
+  searchWorkflows(
+    query: string,
+    opts?: { include_artifact_content?: boolean; status?: 'active' | 'paused' | 'completed' }
+  ): Array<{
+    workflow: DbWorkflow;
+    matched_steps: DbWorkflowStep[];
+    matched_artifacts: (DbWorkflowArtifact & { content_snippet?: string })[];
+  }> {
+    const lq = `%${query.toLowerCase()}%`;
+
+    // Find matching steps
+    const matchedStepRows = this.db.prepare(`
+      SELECT ws.* FROM workflow_steps ws
+      JOIN workflows w ON w.id = ws.workflow_id
+      WHERE (LOWER(ws.summary) LIKE ? OR LOWER(IFNULL(ws.pending_tasks,'')) LIKE ?)
+      ${opts?.status ? 'AND w.status = ?' : ''}
+      ORDER BY ws.workflow_id, ws.step_index ASC
+    `).all(...(opts?.status ? [lq, lq, opts.status] : [lq, lq])) as DbWorkflowStep[];
+
+    // Find matching artifacts by source_name
+    const matchedArtifactRows = this.db.prepare(`
+      SELECT wa.* FROM workflow_artifacts wa
+      JOIN workflows w ON w.id = wa.workflow_id
+      WHERE LOWER(wa.source_name) LIKE ?
+      ${opts?.status ? 'AND w.status = ?' : ''}
+      ORDER BY wa.workflow_id, wa.created_at ASC
+    `).all(...(opts?.status ? [lq, opts.status] : [lq])) as DbWorkflowArtifact[];
+
+    // If content search requested, also scan artifact files
+    const contentMatchedArtifactIds = new Set<string>();
+    const artifactContentSnippets = new Map<string, string>();
+    if (opts?.include_artifact_content) {
+      const allArtifacts = this.db.prepare(
+        `SELECT wa.* FROM workflow_artifacts wa JOIN workflows w ON w.id = wa.workflow_id${opts.status ? ' WHERE w.status = ?' : ''}`
+      ).all(...(opts.status ? [opts.status] : [])) as DbWorkflowArtifact[];
+      const lqPlain = query.toLowerCase();
+      for (const a of allArtifacts) {
+        if (contentMatchedArtifactIds.has(a.id)) continue;
+        try {
+          if (fs.existsSync(a.file_path)) {
+            const text = fs.readFileSync(a.file_path, 'utf-8');
+            const idx = text.toLowerCase().indexOf(lqPlain);
+            if (idx !== -1) {
+              contentMatchedArtifactIds.add(a.id);
+              const start = Math.max(0, idx - 80);
+              const end = Math.min(text.length, idx + query.length + 80);
+              artifactContentSnippets.set(a.id, (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : ''));
+            }
+          }
+        } catch { /* skip unreadable */ }
+      }
+    }
+
+    // Collect all relevant workflow IDs
+    const workflowIdSet = new Set<string>([
+      ...matchedStepRows.map(s => s.workflow_id),
+      ...matchedArtifactRows.map(a => a.workflow_id),
+      ...Array.from(contentMatchedArtifactIds).map(id => {
+        const r = this.db.prepare('SELECT workflow_id FROM workflow_artifacts WHERE id = ?').get(id) as { workflow_id: string } | undefined;
+        return r?.workflow_id || '';
+      }).filter(Boolean)
     ]);
 
-    // Get all active nodes (including those with history) to check for missing files or spurious names
+    const results: Array<{ workflow: DbWorkflow; matched_steps: DbWorkflowStep[]; matched_artifacts: (DbWorkflowArtifact & { content_snippet?: string })[] }> = [];
+    for (const wid of workflowIdSet) {
+      const workflow = this.getWorkflow(wid);
+      if (!workflow) continue;
+      const steps = matchedStepRows.filter(s => s.workflow_id === wid);
+      const artByName = matchedArtifactRows.filter(a => a.workflow_id === wid);
+      const artByContent: DbWorkflowArtifact[] = opts?.include_artifact_content
+        ? (this.db.prepare('SELECT * FROM workflow_artifacts WHERE workflow_id = ?').all(wid) as DbWorkflowArtifact[]).filter(a => contentMatchedArtifactIds.has(a.id) && !artByName.find(x => x.id === a.id))
+        : [];
+      const allArtifacts: (DbWorkflowArtifact & { content_snippet?: string })[] = [
+        ...artByName.map(a => ({ ...a, content_snippet: artifactContentSnippets.get(a.id) })),
+        ...artByContent.map(a => ({ ...a, content_snippet: artifactContentSnippets.get(a.id) }))
+      ];
+      results.push({ workflow, matched_steps: steps, matched_artifacts: allArtifacts });
+    }
+
+    // Sort by most recently updated workflow first
+    results.sort((a, b) => b.workflow.updated_at.localeCompare(a.workflow.updated_at));
+    return results;
+  }
+
+  /**
+   * Imports an existing flow/architecture doc as a paused workflow (not active — importing
+   * a doc isn't the same as declaring active work). Idempotent on `name`: re-importing the
+   * same doc overwrites its existing `imported_doc` artifact file in place instead of
+   * creating a duplicate workflow every time the source docs are re-imported.
+   */
+  importWorkflowDoc(name: string, description: string, content: string, sourceFileName: string): { workflow: DbWorkflow; created: boolean } {
+    const existing = this.db.prepare('SELECT * FROM workflows WHERE name = ?').get(name) as DbWorkflow | undefined;
+    const now = new Date().toISOString();
+
+    if (existing) {
+      this.db.prepare(`UPDATE workflows SET description = ?, updated_at = ? WHERE id = ?`).run(description, now, existing.id);
+      const existingArtifact = this.db.prepare(
+        `SELECT * FROM workflow_artifacts WHERE workflow_id = ? AND type = 'imported_doc' ORDER BY created_at ASC LIMIT 1`
+      ).get(existing.id) as DbWorkflowArtifact | undefined;
+      if (existingArtifact) {
+        fs.writeFileSync(existingArtifact.file_path, content, 'utf-8');
+      } else {
+        this.addWorkflowArtifact(existing.id, { type: 'imported_doc', sourceName: sourceFileName, content });
+      }
+      this.writeWorkflowToDisk(existing.id);
+      return { workflow: { ...existing, description, updated_at: now }, created: false };
+    }
+
+    const id = `wf_${crypto.randomUUID()}`;
+    this.db.prepare(`
+      INSERT INTO workflows (id, name, description, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'paused', ?, ?)
+    `).run(id, name, description, now, now);
+    this.addWorkflowStep(id, { summary: `Imported existing flow documentation: ${sourceFileName}` });
+    this.addWorkflowArtifact(id, { type: 'imported_doc', sourceName: sourceFileName, content });
+    // writeWorkflowToDisk is already called inside addWorkflowArtifact/addWorkflowStep above
+    return { workflow: { id, name, description, status: 'paused', created_at: now, updated_at: now }, created: true };
+  }
+
+  private static readonly SPURIOUS_NODE_NAMES = new Set([
+    'promise', 'map', 'set', 'json', 'console', 'error', 'object', 'function', 'array', 'string', 'number', 'boolean', 'regexp', 'date', 'math',
+    'any', 'void', 'unknown', 'never', 'null', 'undefined', 'dict', 'list',
+    'data', 'useeffect', 'val', 'temp', 'result', 'item', 'key', 'value', 'err', 'req', 'res', 'args', 'params', 'response', 'request'
+  ]);
+
+  /**
+   * Read-only detection shared by `pruneSpuriousNodes` (which acts on it) and `devsmind
+   * analyze`'s dry-run report (which just lists it). Never mutates the DB.
+   */
+  findSpuriousAndMissingFileNodes(workspaceRoot: string): {
+    spurious: { id: string; name: string; file_path: string }[];
+    missingFile: { id: string; name: string; file_path: string }[];
+  } {
     const stmt = this.db.prepare(`
       SELECT id, name, file_path FROM nodes
       WHERE deprecated = 0
     `);
     const candidates = stmt.all() as { id: string; name: string; file_path: string }[];
 
+    const spurious: { id: string; name: string; file_path: string }[] = [];
+    const missingFile: { id: string; name: string; file_path: string }[] = [];
+
+    for (const node of candidates) {
+      const lowerName = node.name.toLowerCase();
+      if (DevMindDatabase.SPURIOUS_NODE_NAMES.has(lowerName)) {
+        spurious.push(node);
+        continue;
+      }
+
+      if (node.file_path) {
+        const paths = node.file_path.split(',').map(p => p.trim()).filter(Boolean);
+        if (paths.length > 0) {
+          const allMissing = paths.every(p => {
+            const resolvedPath = path.isAbsolute(p) ? p : path.resolve(workspaceRoot, p);
+            return !fs.existsSync(resolvedPath);
+          });
+          if (allMissing) missingFile.push(node);
+        }
+      }
+    }
+
+    return { spurious, missingFile };
+  }
+
+  pruneSpuriousNodes(workspaceRoot: string): { prunedCount: number; prunedNodes: string[] } {
+    const { spurious, missingFile } = this.findSpuriousAndMissingFileNodes(workspaceRoot);
+    const candidates = [...spurious, ...missingFile];
+
     const idsToDelete: string[] = [];
     const namesDeleted: string[] = [];
     const affectedFilePaths = new Set<string>();
 
     for (const node of candidates) {
-      const lowerName = node.name.toLowerCase();
-
-      // 1. Check if name is in the spurious list
-      const isSpurious = spuriousNames.has(lowerName);
-
-      // 2. Check if file path does not exist on disk
-      let fileMissing = false;
+      idsToDelete.push(node.id);
+      namesDeleted.push(`${node.name} (${node.id})`);
       if (node.file_path) {
-        const paths = node.file_path.split(',').map(p => p.trim()).filter(Boolean);
-        if (paths.length > 0) {
-          const allMissing = paths.every(p => {
-            const resolvedPath = path.isAbsolute(p)
-              ? p
-              : path.resolve(workspaceRoot, p);
-            return !fs.existsSync(resolvedPath);
-          });
-          if (allMissing) {
-            fileMissing = true;
-          }
-        }
-      }
-
-      if (isSpurious || fileMissing) {
-        idsToDelete.push(node.id);
-        namesDeleted.push(`${node.name} (${node.id})`);
-        if (node.file_path) {
-          for (const p of node.file_path.split(',').map(s => s.trim()).filter(Boolean)) {
-            affectedFilePaths.add(p);
-          }
+        for (const p of node.file_path.split(',').map(s => s.trim()).filter(Boolean)) {
+          affectedFilePaths.add(p);
         }
       }
     }
@@ -1298,13 +1782,15 @@ export class DevMindDatabase {
 
   public toRepoRelativePath(absolutePath: string): string {
     if (!absolutePath || !this.context) return absolutePath;
-    const abs = path.resolve(absolutePath).replace(/\\/g, '/');
+    const abs = canonicalizePath(absolutePath).replace(/\\/g, '/');
+    const absLower = abs.toLowerCase();
     
     for (const repo of this.context.config.repos) {
       const repoPath = resolveRepoPath(this.context, repo.name);
       if (repoPath) {
-        const normalizedRepoPath = path.resolve(repoPath).replace(/\\/g, '/');
-        if (abs === normalizedRepoPath || abs.startsWith(normalizedRepoPath + '/')) {
+        const normalizedRepoPath = canonicalizePath(repoPath).replace(/\\/g, '/');
+        const normalizedRepoPathLower = normalizedRepoPath.toLowerCase();
+        if (absLower === normalizedRepoPathLower || absLower.startsWith(normalizedRepoPathLower + '/')) {
           const relative = path.relative(normalizedRepoPath, abs).replace(/\\/g, '/');
           return `{${repo.name}}/${relative}`;
         }
@@ -1312,32 +1798,112 @@ export class DevMindDatabase {
     }
     
     // Fallback: resolve relative to workspace root
-    const workspaceRoot = path.dirname(this.dbPath);
+    const workspaceRoot = canonicalizePath(path.dirname(this.dbPath));
     return path.relative(workspaceRoot, absolutePath).replace(/\\/g, '/');
+  }
+
+  /**
+   * Rejects a resolved path that escapes its expected root (e.g. via a stored
+   * `{repo}/../../..` path traveling outside the repo) by clamping it back to
+   * the root itself. node_id/file_path values flow in from AI-supplied tool
+   * calls, so a resolve must never be trusted to stay inside root on its own.
+   */
+  private clampToRoot(root: string, resolved: string): string {
+    const normalizedRoot = canonicalizePath(root);
+    const normalizedResolved = canonicalizePath(resolved);
+    const rootLower = normalizedRoot.toLowerCase();
+    const resolvedLower = normalizedResolved.toLowerCase();
+    if (resolvedLower === rootLower || resolvedLower.startsWith(rootLower + path.sep)) {
+      return normalizedResolved;
+    }
+    console.warn(`⚠️ Path traversal blocked: "${resolved}" escapes root "${root}"`);
+    return normalizedRoot;
+  }
+
+  /**
+   * True if `absPath` sits inside a configured repo root or the workspace root itself.
+   * Used to reject `stage_change`/`update_history` file paths that would otherwise let a
+   * tool call read/write any file on disk (absolute path, or a `../` escape) instead of
+   * just repo source — nothing upstream of this validates that the AI-supplied path is
+   * actually inside the project.
+   */
+  public isPathAllowed(absPath: string): boolean {
+    const abs = canonicalizePath(absPath);
+    const absLower = abs.toLowerCase();
+    const workspaceRoot = canonicalizePath(path.dirname(this.dbPath));
+    const workspaceRootLower = workspaceRoot.toLowerCase();
+    if (absLower === workspaceRootLower || absLower.startsWith(workspaceRootLower + path.sep)) return true;
+    if (this.context) {
+      for (const repo of this.context.config.repos) {
+        const repoPath = resolveRepoPath(this.context, repo.name);
+        if (repoPath) {
+          const normalizedRepoPath = canonicalizePath(repoPath);
+          const normalizedRepoPathLower = normalizedRepoPath.toLowerCase();
+          if (absLower === normalizedRepoPathLower || absLower.startsWith(normalizedRepoPathLower + path.sep)) return true;
+        }
+      }
+    }
+    return false;
   }
 
   public toAbsolutePath(repoRelativePath: string): string {
     if (!repoRelativePath) return repoRelativePath;
-    const workspaceRoot = path.dirname(this.dbPath);
-    
+    const workspaceRoot = canonicalizePath(path.dirname(this.dbPath));
+
     const match = repoRelativePath.match(/^\{([^}]+)\}\/(.*)$/);
     if (match && this.context) {
       const repoName = match[1];
       const relativePath = match[2];
       const repoPath = resolveRepoPath(this.context, repoName);
       if (repoPath) {
-        return path.resolve(repoPath, relativePath);
+        return canonicalizePath(this.clampToRoot(repoPath, path.resolve(repoPath, relativePath)));
       }
     }
-    
+
+    // Heuristic: if it doesn't start with {repoName} but contains a configured repo name in the path
+    if (this.context) {
+      for (const repo of this.context.config.repos) {
+        // Find if repo.name appears as a folder in the path, e.g. "harrir-express-backend/tests/..."
+        const escapedRepoName = repo.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp('(?:^|/|\\\\)' + escapedRepoName + '(?:/|\\\\)(.*)$', 'i');
+        const m = repoRelativePath.match(regex);
+        if (m) {
+          const repoPath = resolveRepoPath(this.context, repo.name);
+          if (repoPath) {
+            const relativePath = m[1];
+            return canonicalizePath(path.resolve(repoPath, relativePath));
+          }
+        }
+      }
+    }
+
     // Fallback: resolve relative to workspace root
-    return path.resolve(workspaceRoot, repoRelativePath);
+    return canonicalizePath(this.clampToRoot(workspaceRoot, path.resolve(workspaceRoot, repoRelativePath)));
   }
 
   syncFromDisk() {
     this.db.pragma('foreign_keys = OFF');
     try {
       const workspaceRoot = path.dirname(this.dbPath);
+
+      // 0. Auto-heal any legacy relative path records in SQLite
+      try {
+        const legacyNodes = this.db.prepare(
+          "SELECT id, file_path FROM nodes WHERE file_path NOT LIKE 'c:%' AND file_path NOT LIKE 'C:%' AND file_path NOT LIKE '/%'"
+        ).all() as { id: string; file_path: string }[];
+        if (legacyNodes.length > 0) {
+          const updateStmt = this.db.prepare('UPDATE nodes SET file_path = ? WHERE id = ?');
+          const healTx = this.db.transaction(() => {
+            for (const n of legacyNodes) {
+              const abs = this.toAbsolutePath(n.file_path);
+              updateStmt.run(abs, n.id);
+            }
+          });
+          healTx();
+        }
+      } catch (err) {
+        // ignore legacy errors
+      }
       
       // 1. Sync History JSONs
       const historyDir = path.join(workspaceRoot, 'history');
@@ -1462,6 +2028,80 @@ export class DevMindDatabase {
           syncGraphTx();
         }
       }
+
+      // 3. Sync Workflow JSONs
+      const workflowsDir = this.workflowsDir();
+      if (fs.existsSync(workflowsDir)) {
+        const upsertWorkflow = this.db.prepare(`
+          INSERT INTO workflows (id, name, description, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            description = excluded.description,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        `);
+        const upsertStep = this.db.prepare(`
+          INSERT OR IGNORE INTO workflow_steps (id, workflow_id, step_index, summary, pending_tasks, history_ids, session_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const upsertArtifact = this.db.prepare(`
+          INSERT OR IGNORE INTO workflow_artifacts (id, workflow_id, step_id, type, source_name, file_path, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        // Track which workflow.json has is_active:true with the latest updated_at
+        let bestActiveId: string | null = null;
+        let bestActiveUpdatedAt = '';
+
+        const syncWorkflowsTx = this.db.transaction(() => {
+          const subdirs = fs.readdirSync(workflowsDir);
+          for (const subdir of subdirs) {
+            const jsonPath = path.join(workflowsDir, subdir, 'workflow.json');
+            if (!fs.existsSync(jsonPath)) continue;
+            try {
+              const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+              if (!data.id || !data.name) continue;
+
+              upsertWorkflow.run(
+                data.id, data.name, data.description || '', data.status || 'paused',
+                data.created_at || new Date().toISOString(),
+                data.updated_at || new Date().toISOString()
+              );
+
+              for (const s of (data.steps || [])) {
+                if (!s.id) continue;
+                upsertStep.run(
+                  s.id, data.id, s.step_index, s.summary || '',
+                  s.pending_tasks || null, s.history_ids || null, s.session_id || null,
+                  s.created_at || new Date().toISOString()
+                );
+              }
+
+              for (const a of (data.artifact_index || [])) {
+                if (!a.id) continue;
+                upsertArtifact.run(
+                  a.id, data.id, a.step_id || null, a.type || 'unknown',
+                  a.source_name || '', a.file_path || '', a.created_at || new Date().toISOString()
+                );
+              }
+
+              // Track which workflow declared itself active most recently
+              if (data.is_active && data.updated_at > bestActiveUpdatedAt) {
+                bestActiveId = data.id;
+                bestActiveUpdatedAt = data.updated_at;
+              }
+            } catch { /* skip malformed */ }
+          }
+        });
+        syncWorkflowsTx();
+
+        // Restore active_workflow_id if not already set and a JSON claims active status
+        if (bestActiveId && !this.getSystemMeta('active_workflow_id')) {
+          this.setSystemMeta('active_workflow_id', bestActiveId);
+        }
+      }
+
     } catch (err) {
       console.warn('⚠️ SQLite warning: Failed to sync from disk:', err);
     } finally {
@@ -1477,9 +2117,9 @@ export class DevMindDatabase {
   writeGraphToDisk(filePath: string) {
     try {
       if (!filePath) return;
-      const workspaceRoot = path.dirname(this.dbPath);
+      const workspaceRoot = canonicalizePath(path.dirname(this.dbPath));
       // Clean/resolve the file path
-      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(workspaceRoot, filePath);
+      const absPath = canonicalizePath(filePath);
       const repoRelPath = this.toRepoRelativePath(absPath);
 
       // E.g., "{harrir-web}/app/page.tsx" -> "graph/harrir-web/app/page.json"
@@ -1495,20 +2135,22 @@ export class DevMindDatabase {
       // is durable across a syncFromDisk() restart and propagates to teammates via git —
       // otherwise the node's history JSON would resurrect it as active on the next start.
       const absEsc = this.likeEscape(absPath);
+      const absLower = absPath.toLowerCase();
+      const absEscLower = absEsc.toLowerCase();
       const stmtNodes = this.db.prepare(`
         SELECT * FROM nodes
         WHERE (
-          file_path = ? OR
-          file_path LIKE ? ESCAPE '\\' OR
-          file_path LIKE ? ESCAPE '\\' OR
-          file_path LIKE ? ESCAPE '\\'
+          LOWER(file_path) = ? OR
+          LOWER(file_path) LIKE ? ESCAPE '\\' OR
+          LOWER(file_path) LIKE ? ESCAPE '\\' OR
+          LOWER(file_path) LIKE ? ESCAPE '\\'
         )
       `);
       const nodes = stmtNodes.all(
-        absPath,
-        `${absEsc}, %`,
-        `%, ${absEsc}`,
-        `%, ${absEsc}, %`
+        absLower,
+        `${absEscLower}, %`,
+        `%, ${absEscLower}`,
+        `%, ${absEscLower}, %`
       ) as DbNode[];
 
       if (nodes.length === 0) {
@@ -1554,6 +2196,32 @@ export class DevMindDatabase {
       fs.writeFileSync(graphJsonPath, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
       console.warn('⚠️ SQLite warning: Failed to write graph JSON to disk:', err);
+    }
+  }
+
+  /** Force-syncs all database nodes and workflows to disk JSON files. */
+  syncToDisk(): void {
+    try {
+      const rows = this.db.prepare('SELECT DISTINCT file_path FROM nodes').all() as { file_path: string }[];
+      const filePaths = new Set<string>();
+      for (const row of rows) {
+        if (row.file_path) {
+          for (const p of row.file_path.split(',').map(s => s.trim()).filter(Boolean)) {
+            filePaths.add(p);
+          }
+        }
+      }
+
+      for (const filePath of filePaths) {
+        this.writeGraphToDisk(filePath);
+      }
+
+      const workflowRows = this.db.prepare('SELECT id FROM workflows').all() as { id: string }[];
+      for (const row of workflowRows) {
+        this.writeWorkflowToDisk(row.id);
+      }
+    } catch (err) {
+      console.warn('⚠️ DevsMind: Failed to sync database to disk:', err);
     }
   }
 }

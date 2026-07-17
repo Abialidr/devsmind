@@ -129,3 +129,14 @@ export function resolveRepoPath(context: ProjectContext, repoName: string): stri
     return null;
   }
 }
+
+/** Canonicalizes drive letter to lowercase on Windows for case-insensitive matching. */
+export function canonicalizePath(p: string): string {
+  if (!p) return p;
+  let resolved = path.resolve(p);
+  if (process.platform === 'win32' && /^[A-Za-z]:/.test(resolved)) {
+    resolved = resolved[0].toLowerCase() + resolved.slice(1);
+  }
+  return resolved;
+}
+

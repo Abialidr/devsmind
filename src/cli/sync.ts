@@ -3,6 +3,8 @@ import * as path from 'path';
 import Database from 'better-sqlite3';
 import { resolveDevmindDir } from '../utils/config';
 import { DevMindDatabase } from '../db/database';
+import { runAnalysis } from '../db/analyze';
+import { printReport } from './analyze';
 
 /**
  * `devsmind sync` — force the on-disk graph (`graph/**`) and history
@@ -13,8 +15,12 @@ import { DevMindDatabase } from '../db/database';
  * trigger a sync, and the DB's constructor-time `syncFromDisk()` only runs once
  * per process. So after a `git pull` the committed graph changes never reach the
  * local DB without a restart. This command applies them on demand.
+ *
+ * `--analyze` (optionally with `--fix`) runs `devsmind analyze` immediately after,
+ * on the same connection — the natural place to catch drift a teammate's changes
+ * introduced, right when you pull them in.
  */
-export async function handleSync(opts: { path?: string }): Promise<void> {
+export async function handleSync(opts: { path?: string; analyze?: boolean; fix?: boolean; godEntityThreshold?: string }): Promise<void> {
   const devmindDir = resolveDevmindDir(opts.path);
 
   if (!devmindDir) {
@@ -32,13 +38,20 @@ export async function handleSync(opts: { path?: string }): Promise<void> {
   // Read the pre-sync counts straight from the existing brain.db file (if any),
   // BEFORE DevMindDatabase's constructor runs syncFromDisk(). This lets us show
   // an honest delta of what the sync actually pulled in.
-  const before = readRawCounts(dbPath);
+  let before: { nodes: number; connections: number; history: number };
+  try {
+    before = readRawCounts(dbPath);
+  } catch (err) {
+    console.error(`\n❌ ${(err as Error).message}`);
+    process.exit(1);
+  }
 
   // Constructing the DB runs syncFromDisk() once; we call it again explicitly so
   // the behaviour is obvious and robust even if the constructor changes later.
   const db = new DevMindDatabase(dbPath);
   try {
     db.syncFromDisk();
+    db.syncToDisk();
     const after = db.getCounts();
 
     const delta = (a: number, b: number): string => {
@@ -50,18 +63,40 @@ export async function handleSync(opts: { path?: string }): Promise<void> {
     console.log(`   Nodes       : ${after.nodes}${delta(before.nodes, after.nodes)}`);
     console.log(`   Connections : ${after.connections}${delta(before.connections, after.connections)}`);
     console.log(`   History     : ${after.history}${delta(before.history, after.history)}\n`);
+
+    if (opts.analyze) {
+      const godEntityThreshold = opts.godEntityThreshold ? parseInt(opts.godEntityThreshold, 10) : undefined;
+      console.log(`🩺 Running analyze${opts.fix ? ' (--fix)' : ''}...`);
+      const report = runAnalysis(db, path.dirname(devmindDir), { fix: opts.fix === true, godEntityThreshold });
+      printReport(report);
+    }
   } finally {
     db.close();
   }
 }
 
-/** Count rows in an existing brain.db without triggering a sync. Missing file or tables → zeros. */
+/**
+ * Count rows in an existing brain.db without triggering a sync. A missing file is a
+ * legitimate zero (first-ever sync). A file that exists but fails to OPEN (corrupt/
+ * truncated SQLite) is NOT a legitimate zero — that would print a misleading "+500"
+ * delta as if the DB were simply empty, masking real corruption. Per-table read
+ * failures (e.g. a table missing on an older schema) still fall back to 0.
+ */
 function readRawCounts(dbPath: string): { nodes: number; connections: number; history: number } {
   const zero = { nodes: 0, connections: 0, history: 0 };
   if (!fs.existsSync(dbPath)) return zero;
   let raw: Database.Database | null = null;
   try {
     raw = new Database(dbPath, { readonly: true });
+    // better-sqlite3 opens lazily — a garbage/truncated file doesn't throw until the
+    // first real read, so force one here to detect corruption up front rather than
+    // letting per-table reads below silently swallow it into a misleading zero.
+    raw.prepare('SELECT 1').get();
+  } catch (err) {
+    if (raw) raw.close();
+    throw new Error(`brain.db exists but could not be read (${(err as Error).message}) — it may be corrupted. Investigate before syncing, or remove it to start fresh.`);
+  }
+  try {
     const one = (sql: string): number => {
       try {
         const row = raw!.prepare(sql).get() as { c: number } | undefined;
@@ -75,9 +110,7 @@ function readRawCounts(dbPath: string): { nodes: number; connections: number; hi
       connections: one('SELECT COUNT(*) AS c FROM node_connections'),
       history: one('SELECT COUNT(*) AS c FROM history'),
     };
-  } catch {
-    return zero;
   } finally {
-    if (raw) raw.close();
+    raw.close();
   }
 }

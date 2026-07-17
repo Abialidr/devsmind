@@ -6,6 +6,8 @@ import { handleRule } from './rule';
 import { handleView } from './view';
 import { handlePrune } from './prune';
 import { handleSync } from './sync';
+import { handleAnalyze } from './analyze';
+import { handleWorkflow, handleWorkflowImport } from './workflow';
 import { handleMcp } from './integrations/mcp';
 import { handleMemory } from './integrations/memory';
 import { runBackgroundIndexing, runBackgroundReindexing } from './runner';
@@ -39,7 +41,22 @@ program
   )
   .option('--stdio', 'Use stdio transport instead of HTTP (for direct IDE process injection)')
   .option('-p, --port <number>', `HTTP port to listen on (default: ${DEVSMIND_PORT})`, String(DEVSMIND_PORT))
-  .action(async (opts: { stdio?: boolean; port: string }) => {
+  .option('--path <devmind_path>', 'Explicit path to the .devmind directory (auto-detected from cwd by default) — used only for --sync/--analyze below')
+  .option('--sync', 'Run devsmind sync before starting the server')
+  .option('--analyze', 'Run devsmind analyze before starting the server')
+  .option('--fix', 'With --analyze, also apply safe automatic fixes')
+  .action(async (opts: { stdio?: boolean; port: string; path?: string; sync?: boolean; analyze?: boolean; fix?: boolean }) => {
+    if (opts.sync || opts.analyze) {
+      try {
+        // Both flags share the same "sync" entrypoint — --analyze without --sync still
+        // needs a synced DB to analyze against, and handleSync's own syncFromDisk() is a
+        // no-op cost-wise if the DB is already current, so requesting either one syncs.
+        await handleSync({ path: opts.path, analyze: opts.analyze, fix: opts.fix });
+      } catch (err) {
+        console.error(`❌ Pre-start ${opts.analyze ? 'analyze' : 'sync'} failed: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
     if (opts.stdio) {
       // Stdio mode: IDE manages the process directly
       runStdioMcpServer();
@@ -108,11 +125,55 @@ program
   .command('sync')
   .description('Sync the committed graph + history from disk into the local brain.db')
   .option('-p, --path <devmind_path>', 'Explicit path to the .devmind directory (auto-detected from cwd by default)')
-  .action(async (opts: { path?: string }) => {
+  .option('--analyze', 'Run devsmind analyze immediately after syncing')
+  .option('--fix', 'With --analyze, also apply safe automatic fixes')
+  .option('--god-entity-threshold <n>', 'With --analyze, degree threshold for god-entity detection (default 15)')
+  .action(async (opts: { path?: string; analyze?: boolean; fix?: boolean; godEntityThreshold?: string }) => {
     try {
       await handleSync(opts);
     } catch (err) {
       console.error(`❌ Sync failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('analyze')
+  .description('Local, zero-AI graph health check (god entities, cycles, orphans, dangling edges, renames, and more)')
+  .option('-p, --path <devmind_path>', 'Explicit path to the .devmind directory (auto-detected from cwd by default)')
+  .option('--fix', 'Apply safe automatic fixes (deprecate dead nodes, delete dangling edges, migrate renames)')
+  .option('--god-entity-threshold <n>', 'Degree threshold for god-entity detection (default 15)')
+  .action(async (opts: { path?: string; fix?: boolean; godEntityThreshold?: string }) => {
+    try {
+      await handleAnalyze(opts);
+    } catch (err) {
+      console.error(`❌ Analyze failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('workflow')
+  .description('List, view, pause, and resume persistent feature workflows (interactive)')
+  .option('-p, --path <devmind_path>', 'Explicit path to the .devmind directory (auto-detected from cwd by default)')
+  .action(async (opts: { path?: string }) => {
+    try {
+      await handleWorkflow(opts);
+    } catch (err) {
+      console.error(`❌ Workflow command failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('workflow-import <path>')
+  .description('Import a folder of .md flow docs (or a single file) as paused, resumable workflows')
+  .option('-p, --path <devmind_path>', 'Explicit path to the .devmind directory (auto-detected from cwd by default)')
+  .action(async (pathArg: string, opts: { path?: string }) => {
+    try {
+      await handleWorkflowImport(pathArg, opts);
+    } catch (err) {
+      console.error(`❌ Workflow import failed: ${(err as Error).message}`);
       process.exit(1);
     }
   });

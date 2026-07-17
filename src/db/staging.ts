@@ -73,6 +73,8 @@ export interface CommitSummary {
   history_entries: number;
   edges_added: number;
   missing_filled: number;
+  history_ids: string[];
+  node_ids: string[];
 }
 
 /**
@@ -92,6 +94,7 @@ export function commitStagedChanges(
   entries: StagedEntry[]
 ): CommitSummary {
   const stagedIds: string[] = [];
+  const historyIds: string[] = [];
 
   // Pass 1 — nodes + history (+ any explicit connections the caller supplied).
   const explicitEdges: { source: string; target: string }[] = [];
@@ -109,12 +112,13 @@ export function commitStagedChanges(
       file_path: entry.file_path,
       signature: entry.signature || null
     });
-    db.updateHistory({
+    const history = db.updateHistory({
       node_id: nodeId,
       code_snapshot: entry.code_snapshot,
       reasoning: entry.reasoning,
       session_id: entry.session_id
     });
+    historyIds.push(history.id);
 
     for (const c of entry.connections || []) {
       if (c.target_node_id) explicitEdges.push({ source: c.source_node_id || nodeId, target: c.target_node_id });
@@ -133,6 +137,17 @@ export function commitStagedChanges(
     nodes: entries.length,
     history_entries: entries.length,
     edges_added: edgesAdded + explicitEdges.length,
-    missing_filled: missingFilled
+    missing_filled: missingFilled,
+    history_ids: historyIds,
+    node_ids: stagedIds
   };
+}
+
+/** Builds a short workflow-step summary from a batch of staged entries' `what_changed` reasoning. */
+export function summarizeEntriesForWorkflow(entries: StagedEntry[]): string {
+  const bits = entries.map(e => {
+    if (typeof e.reasoning === 'object' && e.reasoning.what_changed) return e.reasoning.what_changed;
+    return e.node_id;
+  });
+  return bits.length === 1 ? bits[0] : `${bits.length} entities updated: ${bits.join('; ')}`;
 }

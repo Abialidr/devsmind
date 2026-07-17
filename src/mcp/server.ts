@@ -16,7 +16,9 @@ import {
   completeScratchpad
 } from '../db/indexer';
 import { scanRepoFiles, INDEXABLE_EXTENSIONS } from '../utils/scanner';
-import { stageEntry, readStaged, clearStaged, commitStagedChanges, StagedEntry } from '../db/staging';
+import { stageEntry, readStaged, clearStaged, commitStagedChanges, summarizeEntriesForWorkflow, StagedEntry } from '../db/staging';
+import { runAnalysis } from '../db/analyze';
+import { importWorkflowDocs } from '../db/workflow-import';
 
 // â”€â”€â”€ Port: devsâ†’D(4)E(5)=45 + mindâ†’M(13)=13 â†’ 4513 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export const DEVSMIND_PORT = 4513;
@@ -38,8 +40,10 @@ Non-negotiable workflow:
 2. To read one function/class: call get_node_code instead of opening the file. It parses live from disk, so it's cheaper and always current.
 3. Before touching any function's signature: call get_node_graph. Git shows you what changed; it never shows you what depends on it. Find out before you break something, not after.
 4. Before refactoring: call get_node_history. Git blame tells you who and when; it never tells you why. The actual decision context only exists here.
-5. After ANY code change, in the SAME turn: call stage_change once per touched entity, then commit_changes exactly once. This is the only moment this reasoning can ever be captured — never end a turn with it undone.
-6. Scope: stage_change is for source code only (functions/classes/logic) and will be REJECTED for stylesheets, markup, JSON/config, docs, images, or any other non-code asset. Do not stage those files — they have no callers/callees to resolve and only bloat the graph.`;
+5. Stage as you go: call stage_change the moment you finish editing a node — one call per node, not per file, and never batched for later. On a long task, call commit_changes at natural checkpoints too (not only once at the very end) — waiting until the whole task is "done" is how staged work gets left uncommitted when a session runs long.
+6. Scope: stage_change is for source code only (functions/classes/logic) and will be REJECTED for stylesheets, markup, JSON/config, docs, images, or any other non-code asset. Do not stage those files — they have no callers/callees to resolve and only bloat the graph.
+7. When you start work that might relate to a multi-session feature, call workflow_list first. If a paused workflow's description looks related to what you're about to do, ask the user whether to resume it (workflow_resume) instead of starting fresh and silently losing its decision history — git blame never shows you a paused feature's prior context, only this does.
+8. If a workflow is active, commit_changes already logs a step for you from what you staged — you do NOT need a separate workflow_add_step call for the normal case. Only call workflow_add_step directly for something a commit doesn't cover (a decision with no code change, or a pending_tasks note).`;
 
 // Shared node-type taxonomy description, reused by update_history and stage_change.
 const NODE_TYPE_DESCRIPTION =
@@ -274,7 +278,7 @@ function createMcpServer(): Server {
         {
           name: 'stage_change',
           description:
-            `Stage ONE changed code node (function/class/method/etc.) into a buffer without writing to the graph yet. SCOPE: only source code files — ${Array.from(INDEXABLE_EXTENSIONS).sort().join(', ')}. Do NOT call this for stylesheets (.css/.scss/.less), markup, JSON/config, docs, or other non-code assets — DevsMind models logic entities with callers/callees, not static files, and staging them only bloats the graph; the call will be rejected. Call this once for EVERY file/entity you touched during a task — passing only the code and reasoning; you do NOT reason about connections here. The \`reasoning\` you write here — why, goal, what was broken before, what ticket — exists nowhere else once this turn ends; it is not in the diff or the commit message, and no later reindex can reconstruct it, so this is the only chance to capture it. When you are done with all the files, call commit_changes ONCE — it creates every node, writes every history entry, and resolves all connections between them via local AST in a single pass (so a call from one changed file into another resolves correctly no matter which order you staged them). Staging is buffered on disk, so it survives a context reset. ⚠️ YOU MUST CALL commit_changes at the end, or nothing is written to the graph — staging alone leaves this reasoning stranded in a buffer no one else will ever see.`,
+            `Stage ONE changed code node (function/class/method/etc.) into a buffer, right after you finish editing it — don't wait until the whole task is done. Call once per NODE, not once per file: a file with 3 changed functions is 3 calls. SCOPE: source code only — ${Array.from(INDEXABLE_EXTENSIONS).sort().join(', ')}. Rejected for stylesheets, markup, JSON/config, docs, or other non-code assets (no callers/callees to resolve). Pass only code + reasoning; connections are resolved automatically by commit_changes, not by you. The \`reasoning\` (why, goal, what was broken, what ticket) exists nowhere else — capture it now, while it's still in context, not after the fact. Staging is buffered on disk and survives a context reset, but is inert until commit_changes runs.`,
           inputSchema: {
             type: 'object',
             properties: {
@@ -308,7 +312,7 @@ function createMcpServer(): Server {
         {
           name: 'commit_changes',
           description:
-            'Commit all buffered stage_change entries in one atomic pass: creates/updates every staged node, writes every history snapshot, then resolves all connections between the staged nodes (and into the existing graph) via local AST — auto-creating any referenced-but-missing target nodes. Clears the buffer on success. Call this exactly once after you have finished staging every file you touched, in the SAME turn — every teammate\'s AI agent reads this same graph, so an uncommitted turn is not just your own missed step, it\'s a gap in what the whole team sees next time they look here.',
+            'Flush all buffered stage_change entries in one atomic pass: creates/updates every staged node, writes every history snapshot, resolves all connections via local AST (auto-creating any referenced-but-missing nodes), then clears the buffer. If a workflow is currently active, this ALSO auto-records a step on its timeline from the staged entries\' reasoning — you do not need a separate workflow_add_step call for the normal case. Call commit_changes at natural checkpoints — after a batch of related nodes, or when switching context — not only once at the very end of a long task; a checkpoint commit can\'t be forgotten the way a single end-of-task one can. Always call it again before ending the turn if anything is still staged: an uncommitted turn leaves the whole team\'s graph stale, not just yours.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -485,6 +489,193 @@ function createMcpServer(): Server {
             },
             required: ['devmind_path']
           }
+        },
+        {
+          name: 'analyze_graph',
+          description:
+            'Run a local, zero-token health check on the graph: god entities (high fan-in/out), circular dependency cycles, orphaned nodes, dangling edges, duplicate/case-collision ids, history missing developer attribution, empty code snapshots, spurious/built-in nodes, missing files, git-detected renames, and git-tracked code files with zero graph nodes. Purely local SQLite/filesystem/git queries — no LLM calls. Call this periodically (or when the graph feels stale/wrong) instead of guessing why context looks off. Set fix:true to auto-apply only the SAFE fixes (soft-deprecate dead nodes, remove dangling edges, migrate detected renames) — everything else is report-only and needs a human or agent decision.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              fix: { type: 'boolean', description: 'If true, applies safe automatic fixes (default: false — dry run/report only)' },
+              god_entity_threshold: { type: 'number', description: 'Connection-degree threshold to flag a god entity (default: 15)' }
+            },
+            required: ['devmind_path']
+          }
+        },
+        {
+          name: 'workflow_create',
+          description: 'Start a new persistent, cross-session workflow for a multi-day feature (e.g. "Wallet Integration"). Becomes the active workflow — call workflow_add_step as you make progress so the timeline survives session/context resets. Auto-pauses whatever workflow was previously active.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              name: { type: 'string', description: 'Short human-readable name for the feature/workflow' },
+              description: { type: 'string', description: 'Brief description of the goal — used by you (the agent) to judge whether a later task relates to this workflow' }
+            },
+            required: ['devmind_path', 'name', 'description']
+          }
+        },
+        {
+          name: 'workflow_add_step',
+          description: 'Record a step in the currently active (or specified) workflow\'s timeline — a short note of progress, linked to the history_ids already created via stage_change/commit_changes rather than duplicating any code or reasoning. NOTE: commit_changes already auto-records a step from its staged entries whenever a workflow is active — you do NOT need to call this after every commit. Only call it directly for something a commit doesn\'t cover: a decision made without a code change, a note on what\'s still pending (pending_tasks), or a custom summary richer than the auto-generated one.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'Workflow to add this step to (optional — defaults to the currently active workflow)' },
+              summary: { type: 'string', description: 'Short summary of what this step accomplished' },
+              pending_tasks: { type: 'string', description: 'Optional note on what is still left to do' },
+              history_ids: { type: 'array', items: { type: 'string' }, description: 'Optional history row ids (from stage_change/commit_changes results) this step covers' },
+              session_id: { type: 'string', description: 'Optional session id grouping this step with related history entries' }
+            },
+            required: ['devmind_path', 'summary']
+          }
+        },
+        {
+          name: 'workflow_pause',
+          description: 'Pauses the currently active workflow and clears the active pointer — use when switching to unrelated work, so the next workflow_list call surfaces it as resumable instead of leaving it silently abandoned.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' }
+            },
+            required: ['devmind_path']
+          }
+        },
+        {
+          name: 'workflow_resume',
+          description: 'Resumes a paused workflow, making it active again (auto-pausing whatever was active before).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'The workflow id to resume' }
+            },
+            required: ['devmind_path', 'workflow_id']
+          }
+        },
+        {
+          name: 'workflow_list',
+          description: 'List workflows (optionally filtered by status). Call this when starting work that MIGHT relate to a paused, multi-session feature — if a description looks related to the current task, ask the user whether to resume it (workflow_resume) instead of silently starting fresh and losing its prior decision history.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              status: { type: 'string', enum: ['active', 'paused', 'completed'], description: 'Optional status filter (default: all)' }
+            },
+            required: ['devmind_path']
+          }
+        },
+        {
+          name: 'workflow_get_context',
+          description: 'Get a workflow\'s full timeline in one call — every step (in order) plus every reference artifact\'s metadata (and optionally content). Call this right after resuming a workflow to instantly regain the feature\'s full context. For large/long-running workflows, prefer workflow_get_steps (paginated) + workflow_read_artifact (per artifact) instead.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'The workflow id to fetch context for' },
+              include_artifact_content: { type: 'boolean', description: 'If true, embeds each artifact\'s file content inline in the response (default: false). Only use for small/short workflows — large workflows should use workflow_read_artifact per artifact instead.' }
+            },
+            required: ['devmind_path', 'workflow_id']
+          }
+        },
+        {
+          name: 'workflow_add_artifact',
+          description: 'Save reference material (a spec excerpt, ticket description, API doc, search-result snippet) to a workflow — written to disk under .devmind/workflows/<id>/ and linked in the DB. Use this for material that informed the work but isn\'t part of the code graph itself.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'The target workflow id' },
+              step_id: { type: 'string', description: 'Optional step id this artifact relates to' },
+              type: { type: 'string', description: 'Artifact type, e.g. pm_doc, api_spec, web_snippet' },
+              source_name: { type: 'string', description: 'Title/filename of the artifact source' },
+              content: { type: 'string', description: 'Text or markdown content to save' }
+            },
+            required: ['devmind_path', 'workflow_id', 'type', 'source_name', 'content']
+          }
+        },
+        {
+          name: 'workflow_sync_retroactive',
+          description: 'Backfill a workflow\'s timeline after a whole session went by without using workflow_add_step. You already have the session\'s transcript in your own context — extract the steps yourself and pass them here as structured data. This does NOT accept raw transcript text; DevsMind never runs its own LLM calls, so extraction has to happen on your side, which you can already do for free since you already read it.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'The workflow id to sync into' },
+              steps: {
+                type: 'array',
+                description: 'Steps you extracted from the session, oldest first',
+                items: {
+                  type: 'object',
+                  properties: {
+                    summary: { type: 'string' },
+                    pending_tasks: { type: 'string' },
+                    history_ids: { type: 'array', items: { type: 'string' } }
+                  },
+                  required: ['summary']
+                }
+              }
+            },
+            required: ['devmind_path', 'workflow_id', 'steps']
+          }
+        },
+        {
+          name: 'workflow_import',
+          description: 'Import existing flow/architecture docs (markdown files describing a feature — title, summary, implementation details) as paused, resumable workflows, so reference material a team already wrote lives where you already look (workflow_get_context) instead of scattered elsewhere. Re-importing the same file updates its workflow in place rather than duplicating it.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              folder_path: { type: 'string', description: 'Folder to import every .md file from (one workflow per file)' },
+              file_path: { type: 'string', description: 'A single .md file to import instead of a folder' }
+            },
+            required: ['devmind_path']
+          }
+        },
+        {
+          name: 'workflow_search',
+          description: 'Search across ALL workflows\' step summaries, pending_tasks notes, and artifact source names for a keyword or phrase. Returns matching steps and artifacts grouped by workflow. Use this when you don\'t know which workflow to look in — one call finds relevant context across the entire project history. Set include_artifact_content:true to also scan inside artifact files (slower but more thorough).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              query: { type: 'string', description: 'Keyword or phrase to search for' },
+              status: { type: 'string', enum: ['active', 'paused', 'completed'], description: 'Optional: only search within workflows of this status' },
+              include_artifact_content: { type: 'boolean', description: 'If true, also searches inside artifact file contents and includes a snippet of the matching text (default: false)' }
+            },
+            required: ['devmind_path', 'query']
+          }
+        },
+        {
+          name: 'workflow_read_artifact',
+          description: 'Read the full content of a single workflow artifact file. Use this after workflow_get_context or workflow_search returns an artifact you want to read — pass the artifact id. This avoids loading the full context dump just to read one reference doc.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'The workflow id that owns the artifact' },
+              artifact_id: { type: 'string', description: 'The artifact id to read (from workflow_get_context or workflow_search results)' }
+            },
+            required: ['devmind_path', 'workflow_id', 'artifact_id']
+          }
+        },
+        {
+          name: 'workflow_get_steps',
+          description: 'Read steps from a workflow with pagination support. Use last_n to get only the most recent N steps (recommended when resuming a long-running workflow — read the tail to catch up, not the full history). Alternatively use limit+offset for forward pagination.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              devmind_path: { type: 'string', description: 'Absolute path to the .devmind directory' },
+              workflow_id: { type: 'string', description: 'The workflow id to read steps from' },
+              last_n: { type: 'number', description: 'Return only the last N steps (most recent). Recommended for catching up on long workflows.' },
+              limit: { type: 'number', description: 'Max steps to return (for forward pagination with offset)' },
+              offset: { type: 'number', description: 'Step offset for forward pagination (default: 0)' }
+            },
+            required: ['devmind_path', 'workflow_id']
+          }
         }
       ]
     };
@@ -562,8 +753,23 @@ function createMcpServer(): Server {
 
         case 'update_history': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
-          const filePath = String(args.file_path);
+          const rawFilePath = String(args.file_path);
           const db = getDatabase(devmindPath);
+          const workspaceRoot = path.dirname(devmindPath);
+          const filePath = path.isAbsolute(rawFilePath) ? path.resolve(rawFilePath) : path.resolve(workspaceRoot, rawFilePath);
+          if (!db.isPathAllowed(filePath)) {
+            return {
+              isError: true,
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  success: false,
+                  error: `file_path resolves outside the project's configured repos — nothing was written.`,
+                  resolved_path: filePath
+                })
+              }]
+            };
+          }
 
           // Single-shot path: stage one entry and commit it immediately, so a lone edit still
           // gets its node, history, AND outgoing edges resolved via the shared commit logic.
@@ -727,8 +933,8 @@ function createMcpServer(): Server {
 
         case 'stage_change': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
-          const filePath = String(args.file_path);
-          const ext = path.extname(filePath).toLowerCase();
+          const rawFilePath = String(args.file_path);
+          const ext = path.extname(rawFilePath).toLowerCase();
           if (!INDEXABLE_EXTENSIONS.has(ext)) {
             return {
               isError: true,
@@ -740,6 +946,23 @@ function createMcpServer(): Server {
                   reason:
                     'DevsMind models functions, classes, and logic entities in source code. Stylesheets (.css/.scss/.less), markup, JSON/config, docs, and other non-code assets are intentionally out of scope, not oversights — staging them would only bloat the graph with nodes that have no callers/callees to resolve. Do not retry this file.',
                   supported_extensions: Array.from(INDEXABLE_EXTENSIONS).sort()
+                })
+              }]
+            };
+          }
+          const workspaceRoot = path.dirname(devmindPath);
+          const filePath = path.isAbsolute(rawFilePath) ? path.resolve(rawFilePath) : path.resolve(workspaceRoot, rawFilePath);
+          const stageDb = getDatabase(devmindPath);
+          if (!stageDb.isPathAllowed(filePath)) {
+            return {
+              isError: true,
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  staged: false,
+                  error: `file_path resolves outside the project's configured repos — nothing was staged.`,
+                  reason: 'stage_change only accepts paths inside a repo this project knows about, to prevent staging/reading files outside the project.',
+                  resolved_path: filePath
                 })
               }]
             };
@@ -779,14 +1002,30 @@ function createMcpServer(): Server {
           }
           const summary = commitStagedChanges(db, devmindPath, entries);
           clearStaged(devmindPath);
+
+          // If a workflow is active, auto-record this commit as a step — the agent doesn't
+          // need a separate workflow_add_step call for the common case. Call workflow_add_step
+          // directly only when you want to attach pending_tasks or a richer custom summary.
+          let workflowStepId: string | null = null;
+          const activeWorkflow = db.getActiveWorkflow();
+          if (activeWorkflow) {
+            const step = db.addWorkflowStep(activeWorkflow.id, {
+              summary: summarizeEntriesForWorkflow(entries),
+              historyIds: summary.history_ids
+            });
+            workflowStepId = step.id;
+          }
+
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 committed: true,
                 message: `✅ Committed ${summary.nodes} node(s), ${summary.history_entries} history entr(ies), ${summary.edges_added} connection(s) resolved` +
-                  (summary.missing_filled > 0 ? `, ${summary.missing_filled} missing node(s) auto-created.` : '.'),
-                ...summary
+                  (summary.missing_filled > 0 ? `, ${summary.missing_filled} missing node(s) auto-created.` : '.') +
+                  (workflowStepId ? ` Logged as a step on active workflow "${activeWorkflow!.name}".` : ''),
+                ...summary,
+                workflow_step_id: workflowStepId
               }, null, 2)
             }]
           };
@@ -857,7 +1096,8 @@ function createMcpServer(): Server {
         case 'get_node_graph': {
           const devmindPath = resolveDevmindPath(args.devmind_path);
           const nodeId = String(args.node_id);
-          const maxDepth = args.max_depth ? Number(args.max_depth) : 6;
+          const rawMaxDepth = args.max_depth ? Number(args.max_depth) : 6;
+          const maxDepth = Number.isFinite(rawMaxDepth) ? Math.min(10, Math.max(1, Math.trunc(rawMaxDepth))) : 6;
           const direction =
             args.direction === 'out' || args.direction === 'in' || args.direction === 'both'
               ? args.direction
@@ -982,6 +1222,140 @@ function createMcpServer(): Server {
               }, null, 2)
             }]
           };
+        }
+
+        case 'analyze_graph': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const workspaceRoot = path.dirname(devmindPath);
+          const db = getDatabase(devmindPath);
+          const godEntityThreshold = args.god_entity_threshold ? Number(args.god_entity_threshold) : undefined;
+          const report = runAnalysis(db, workspaceRoot, {
+            fix: args.fix === true,
+            godEntityThreshold: Number.isFinite(godEntityThreshold) ? godEntityThreshold : undefined
+          });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(report, null, 2) }]
+          };
+        }
+
+        case 'workflow_create': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const workflow = db.createWorkflow(String(args.name), String(args.description));
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'created', workflow }, null, 2) }] };
+        }
+
+        case 'workflow_add_step': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const workflowId = args.workflow_id ? String(args.workflow_id) : db.getActiveWorkflow()?.id;
+          if (!workflowId) {
+            return {
+              isError: true,
+              content: [{ type: 'text', text: JSON.stringify({ error: 'No active workflow and no workflow_id given. Call workflow_create or workflow_resume first, or pass workflow_id explicitly.' }) }]
+            };
+          }
+          const step = db.addWorkflowStep(workflowId, {
+            summary: String(args.summary),
+            pendingTasks: args.pending_tasks ? String(args.pending_tasks) : undefined,
+            historyIds: Array.isArray(args.history_ids) ? args.history_ids.map(String) : undefined,
+            sessionId: args.session_id ? String(args.session_id) : undefined
+          });
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'added', step }, null, 2) }] };
+        }
+
+        case 'workflow_pause': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const paused = db.pauseWorkflow();
+          return {
+            content: [{ type: 'text', text: JSON.stringify(paused ? { status: 'paused', workflow: paused } : { status: 'no_active_workflow' }, null, 2) }]
+          };
+        }
+
+        case 'workflow_resume': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const workflow = db.resumeWorkflow(String(args.workflow_id));
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'active', workflow }, null, 2) }] };
+        }
+
+        case 'workflow_list': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const status = args.status === 'active' || args.status === 'paused' || args.status === 'completed' ? args.status : undefined;
+          const workflows = db.listWorkflows(status);
+          return { content: [{ type: 'text', text: JSON.stringify({ workflows }, null, 2) }] };
+        }
+
+        case 'workflow_get_context': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const context = db.getWorkflowContext(String(args.workflow_id), {
+            includeArtifactContent: args.include_artifact_content === true
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(context, null, 2) }] };
+        }
+
+        case 'workflow_add_artifact': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const artifact = db.addWorkflowArtifact(String(args.workflow_id), {
+            stepId: args.step_id ? String(args.step_id) : undefined,
+            type: String(args.type),
+            sourceName: String(args.source_name),
+            content: String(args.content)
+          });
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'added', artifact }, null, 2) }] };
+        }
+
+        case 'workflow_sync_retroactive': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const workflowId = String(args.workflow_id);
+          const stepsInput = Array.isArray(args.steps) ? args.steps : [];
+          const added = stepsInput.map((s: any) => db.addWorkflowStep(workflowId, {
+            summary: String(s.summary),
+            pendingTasks: s.pending_tasks ? String(s.pending_tasks) : undefined,
+            historyIds: Array.isArray(s.history_ids) ? s.history_ids.map(String) : undefined
+          }));
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'synced', steps_added: added.length, steps: added }, null, 2) }] };
+        }
+
+        case 'workflow_import': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const result = importWorkflowDocs(db, args.folder_path ? String(args.folder_path) : undefined, args.file_path ? String(args.file_path) : undefined);
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'workflow_search': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const status = args.status === 'active' || args.status === 'paused' || args.status === 'completed' ? args.status : undefined;
+          const results = db.searchWorkflows(String(args.query), {
+            include_artifact_content: args.include_artifact_content === true,
+            status
+          });
+          return { content: [{ type: 'text', text: JSON.stringify({ results, total_workflows_matched: results.length }, null, 2) }] };
+        }
+
+        case 'workflow_read_artifact': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const result = db.readWorkflowArtifact(String(args.workflow_id), String(args.artifact_id));
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        }
+
+        case 'workflow_get_steps': {
+          const devmindPath = resolveDevmindPath(args.devmind_path);
+          const db = getDatabase(devmindPath);
+          const steps = db.getWorkflowSteps(String(args.workflow_id), {
+            last_n: args.last_n ? Number(args.last_n) : undefined,
+            limit: args.limit ? Number(args.limit) : undefined,
+            offset: args.offset ? Number(args.offset) : undefined
+          });
+          return { content: [{ type: 'text', text: JSON.stringify({ workflow_id: args.workflow_id, steps, count: steps.length }, null, 2) }] };
         }
 
         default:
